@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
+#include "esp_adc/adc_oneshot.h"
 
 #include "pins.hpp"
 #include "monitor.hpp"
@@ -104,14 +105,27 @@ extern "C" void app_main(void) {
     imu_cfg.read_cb = ImuReadReg;
     imu_cfg.write_cb = ImuWriteReg;
 
-    static monitor::Monitor monitor{imu_cfg};
+    monitor::MonitorConfig monitor_cfg{};
+    monitor_cfg.ae_gpio_pin = static_cast<std::int32_t>(pins::AE_GPIO_PIN);
+    monitor_cfg.ae_adc_channel = static_cast<std::int32_t>(ADC_CHANNEL_3);
+
+    static monitor::Monitor monitor{imu_cfg, monitor_cfg};
     if (!monitor.Init()) {
         std::printf("monitor: init failed\n");
         return;
     }
 
     static logger::Logger logger{};
+    if (!logger.Init()) {
+        std::printf("logger: init failed\n");
+        return;
+    }
+    if (!logger.Start()) {
+        std::printf("logger: start failed\n");
+        return;
+    }
     monitor.RegisterCallback(&logger::Logger::MonitorCallback, &logger);
+    monitor.RegisterFailureCallback(&logger::Logger::FailureCallback, &logger);
 
     const float dt_s = 1.0f / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
     const std::uint32_t rate_hz = static_cast<std::uint32_t>(CONFIG_MONITOR_IMU_RATE_HZ);

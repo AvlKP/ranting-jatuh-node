@@ -1,0 +1,73 @@
+menu "Logger"
+
+config LOGGER_SERIAL_OUTPUT
+    bool "Enable serial output"
+    default n
+    help
+        Print received parameters and failure events over UART.
+
+config LOGGER_WIFI_PERIOD_HOURS
+    int "WiFi/MQTT publish period (hours)"
+    default 6
+    range 1 168
+    help
+        Period between MQTT uploads of parameter batches.
+
+config LOGGER_WIFI_SSID
+    string "WiFi SSID"
+    default ""
+
+config LOGGER_WIFI_PASSWORD
+    string "WiFi password"
+    default ""
+
+config LOGGER_NTP_SERVER
+    string "NTP server"
+    default "pool.ntp.org"
+
+config LOGGER_MQTT_URI
+    string "MQTT broker URI"
+    default "mqtt://broker.hivemq.com"
+
+config LOGGER_MQTT_USERNAME
+    string "MQTT username"
+    default ""
+
+config LOGGER_MQTT_PASSWORD
+    string "MQTT password"
+    default ""
+
+config LOGGER_MQTT_CLIENT_ID
+    string "MQTT client ID"
+    default "ranting-logger"
+
+config LOGGER_MQTT_TOPIC_PARAMETERS
+    string "MQTT parameters topic"
+    default "ranting/parameters"
+
+config LOGGER_MQTT_TOPIC_FAILURES
+    string "MQTT failure topic"
+    default "ranting/failures"
+
+config LOGGER_MQTT_QOS
+    int "MQTT QoS"
+    default 0
+    range 0 2
+
+choice LOGGER_SD_INTERFACE
+    prompt "SD card interface"
+    default LOGGER_SD_INTERFACE_SDMMC
+
+config LOGGER_SD_INTERFACE_SDMMC
+    bool "SDMMC 1-bit"
+
+config LOGGER_SD_INTERFACE_SPI
+    bool "SPI (SDSPI)"
+
+endchoice
+
+config LOGGER_SD_MOUNT_POINT
+    string "SD card mount point"
+    default "/sdcard"
+
+endmenu
