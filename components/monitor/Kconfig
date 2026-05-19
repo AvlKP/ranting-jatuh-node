@@ -14,4 +14,46 @@ config MONITOR_IMU_RATE_HZ
     help
         Target IMU sampling rate in Hz for monitor processing loop.
 
+choice MONITOR_AE_MODE
+    prompt "Acoustic emission mode"
+    default MONITOR_AE_MODE_GPIO
+    help
+        Select acoustic emission failure detection mode.
+
+config MONITOR_AE_MODE_GPIO
+    bool "GPIO interrupt (digital)"
+
+config MONITOR_AE_MODE_ADC
+    bool "ADC threshold (analog)"
+
+endchoice
+
+config MONITOR_AE_ADC_THRESHOLD
+    int "AE ADC threshold"
+    default 3000
+    range 0 4095
+    help
+        Raw ADC threshold for acoustic emission failure.
+
+config MONITOR_PEAK_MIN_AMPLITUDE
+    int "Peak detection min amplitude (deg)"
+    default 2
+    range 0 90
+    help
+        Minimum peak amplitude in degrees for sway and damping detection.
+
+config MONITOR_PEAK_MIN_SPACING_SAMPLES
+    int "Peak detection min spacing (samples)"
+    default 5
+    range 1 500
+    help
+        Minimum sample spacing between peaks for sway and damping detection.
+
+config MONITOR_FREEFALL_THS
+    int "Free-fall threshold (raw)"
+    default 3
+    range 1 7
+    help
+        LSM6DS3 free-fall threshold (register value).
+
 endmenu

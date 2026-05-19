@@ -4,11 +4,16 @@
 
 #include "dsps_fft2r.h"
 #include "esp_timer.h"
+#include "driver/gpio.h"
+#include "esp_adc/adc_oneshot.h"
+#include "esp_err.h"
+#include "esp_attr.h"
 
 namespace monitor {
 
 namespace {
 
+constexpr float kPi = 3.14159265358979323846f;
 constexpr float kTwoPi = 6.2831853071795864769f;
 
 } // namespace
@@ -27,6 +32,58 @@ bool Monitor::Init() noexcept {
         return false;
     }
 
+    if (!imu_.configure_motion_detection(0x09, 0x02, static_cast<std::uint8_t>(CONFIG_MONITOR_FREEFALL_THS))) {
+        return false;
+    }
+
+#if CONFIG_MONITOR_AE_MODE_GPIO
+    if (config_.ae_gpio_pin < 0) {
+        return false;
+    }
+    const gpio_num_t ae_gpio = static_cast<gpio_num_t>(config_.ae_gpio_pin);
+    gpio_config_t io_cfg{};
+    io_cfg.pin_bit_mask = (1ULL << static_cast<std::uint32_t>(ae_gpio));
+    io_cfg.mode = GPIO_MODE_INPUT;
+    io_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+    io_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    io_cfg.intr_type = GPIO_INTR_POSEDGE;
+    if (gpio_config(&io_cfg) != ESP_OK) {
+        return false;
+    }
+
+    const esp_err_t isr_err = gpio_install_isr_service(0);
+    if (isr_err != ESP_OK && isr_err != ESP_ERR_INVALID_STATE) {
+        return false;
+    }
+
+    if (gpio_isr_handler_add(ae_gpio, &Monitor::AeGpioIsr, this) != ESP_OK) {
+        return false;
+    }
+
+    ae_gpio_event_ = false;
+#else
+    if (config_.ae_adc_channel < 0) {
+        return false;
+    }
+    adc_oneshot_unit_init_cfg_t init_cfg{};
+    init_cfg.unit_id = ADC_UNIT_1;
+    adc_oneshot_unit_handle_t handle = nullptr;
+    if (adc_oneshot_new_unit(&init_cfg, &handle) != ESP_OK) {
+        return false;
+    }
+    adc_oneshot_chan_cfg_t chan_cfg{};
+    chan_cfg.atten = ADC_ATTEN_DB_11;
+    chan_cfg.bitwidth = ADC_BITWIDTH_DEFAULT;
+    if (adc_oneshot_config_channel(handle,
+                                   static_cast<adc_channel_t>(config_.ae_adc_channel),
+                                   &chan_cfg) != ESP_OK) {
+        adc_oneshot_del_unit(handle);
+        return false;
+    }
+    adc_handle_ = handle;
+    adc_initialized_ = true;
+#endif
+
     const esp_err_t err = dsps_fft2r_init_fc32(nullptr, static_cast<int>(kFftWindowSamples));
     if (err != ESP_OK) {
         return false;
@@ -41,6 +98,11 @@ void Monitor::RegisterCallback(EventCb cb, void* ctx) noexcept {
     callback_ctx_ = ctx;
 }
 
+void Monitor::RegisterFailureCallback(FailureCb cb, void* ctx) noexcept {
+    failure_callback_ = cb;
+    failure_callback_ctx_ = ctx;
+}
+
 bool Monitor::Update(float dt_s) noexcept {
     sensor::lsm6ds3::Value gyro{};
     sensor::lsm6ds3::Value accel{};
@@ -53,6 +115,8 @@ bool Monitor::Update(float dt_s) noexcept {
     filter_.update(accel_vec, gyro_vec, dt_s);
 
     PushSample(filter_.roll(), filter_.pitch());
+
+    CheckFailureEvents();
 
     if ((sample_count_ >= kStorageSamples) && (write_index_ == 0U)) {
         return ComputeAndPublish();
@@ -87,6 +151,10 @@ bool Monitor::ComputeAndPublish() noexcept {
     }
 
     if (!ComputeNaturalFrequency(result)) {
+        return false;
+    }
+
+    if (!ComputeSwayAndDamping(result)) {
         return false;
     }
 
@@ -195,6 +263,196 @@ bool Monitor::ComputeNaturalFrequency(MonitorResult& result) noexcept {
     return true;
 }
 
+bool Monitor::ComputeSwayAndDamping(MonitorResult& result) noexcept {
+    const std::size_t count = BufferSize();
+    if (count < 3U) {
+        result.roll_sway_pp_max = 0.0f;
+        result.roll_sway_pp_mean = 0.0f;
+        result.pitch_sway_pp_max = 0.0f;
+        result.pitch_sway_pp_mean = 0.0f;
+        result.roll_damping_ratio = 0.0f;
+        result.pitch_damping_ratio = 0.0f;
+        return true;
+    }
+
+    // TODO: Add wind gust/storm state; sway amplitude should be computed only during that state.
+    // TODO: Damping ratio ignores boundary conditions when wind extends beyond window; fix after gust/storm state.
+
+    auto compute_axis = [&](const std::array<float, kStorageSamples>& data,
+                            float& sway_pp_max,
+                            float& sway_pp_mean,
+                            float& damping_ratio) -> bool {
+        const float min_amp = config_.peak_min_amplitude_deg;
+        const std::size_t min_spacing = config_.peak_min_spacing;
+
+        std::size_t last_ext_idx = 0U;
+        float last_ext_val = 0.0f;
+        bool has_last_ext = false;
+        float max_pp = 0.0f;
+        float sum_pp = 0.0f;
+        std::size_t pp_count = 0U;
+
+        float max_abs = 0.0f;
+        std::size_t max_idx = 0U;
+        bool has_max = false;
+
+        for (std::size_t i = 1U; i + 1U < count; ++i) {
+            const std::size_t idx_prev = PhysicalIndex(i - 1U);
+            const std::size_t idx_curr = PhysicalIndex(i);
+            const std::size_t idx_next = PhysicalIndex(i + 1U);
+
+            const float prev = data[idx_prev];
+            const float curr = data[idx_curr];
+            const float next = data[idx_next];
+
+            const bool is_peak = (curr > prev) && (curr > next) && (std::fabs(curr) >= min_amp);
+            const bool is_trough = (curr < prev) && (curr < next) && (std::fabs(curr) >= min_amp);
+
+            if (!(is_peak || is_trough)) {
+                continue;
+            }
+
+            if (has_last_ext && ((i - last_ext_idx) < min_spacing)) {
+                continue;
+            }
+
+            const float ext_val = curr;
+            if (has_last_ext) {
+                const float pp = std::fabs(ext_val - last_ext_val);
+                if (pp > max_pp) {
+                    max_pp = pp;
+                }
+                sum_pp += pp;
+                ++pp_count;
+            }
+
+            const float abs_val = std::fabs(ext_val);
+            if (!has_max || abs_val > max_abs) {
+                max_abs = abs_val;
+                max_idx = i;
+                has_max = true;
+            }
+
+            last_ext_idx = i;
+            last_ext_val = ext_val;
+            has_last_ext = true;
+        }
+
+        sway_pp_max = max_pp;
+        sway_pp_mean = (pp_count > 0U) ? (sum_pp / static_cast<float>(pp_count)) : 0.0f;
+
+        if (!has_max) {
+            damping_ratio = 0.0f;
+            return true;
+        }
+
+        constexpr std::size_t kDecaySpan = 3U;
+        std::size_t found = 0U;
+        float x1 = 0.0f;
+        float x2 = 0.0f;
+        std::size_t last_idx = 0U;
+        bool has_last = false;
+
+        for (std::size_t i = 1U; i + 1U < count; ++i) {
+            const std::size_t idx_prev = PhysicalIndex(i - 1U);
+            const std::size_t idx_curr = PhysicalIndex(i);
+            const std::size_t idx_next = PhysicalIndex(i + 1U);
+
+            const float prev = data[idx_prev];
+            const float curr = data[idx_curr];
+            const float next = data[idx_next];
+
+            const bool is_peak = (curr > prev) && (curr > next) && (std::fabs(curr) >= min_amp);
+            const bool is_trough = (curr < prev) && (curr < next) && (std::fabs(curr) >= min_amp);
+
+            if (!(is_peak || is_trough)) {
+                continue;
+            }
+
+            if (has_last && ((i - last_idx) < min_spacing)) {
+                continue;
+            }
+
+            last_idx = i;
+            has_last = true;
+
+            if (i < max_idx) {
+                continue;
+            }
+
+            if (found == 0U && i == max_idx) {
+                x1 = std::fabs(curr);
+                found = 1U;
+                continue;
+            }
+
+            if (found > 0U && found <= kDecaySpan) {
+                ++found;
+                if (found == (kDecaySpan + 1U)) {
+                    x2 = std::fabs(curr);
+                    break;
+                }
+            }
+        }
+
+        if (found == (kDecaySpan + 1U) && x2 > 0.0f && x1 > x2) {
+            const float delta = std::log(x1 / x2) / static_cast<float>(kDecaySpan);
+            damping_ratio = delta / std::sqrt((4.0f * kPi * kPi) + (delta * delta));
+        } else {
+            damping_ratio = 0.0f;
+        }
+        return true;
+    };
+
+    if (!compute_axis(roll_history_, result.roll_sway_pp_max, result.roll_sway_pp_mean, result.roll_damping_ratio)) {
+        return false;
+    }
+    if (!compute_axis(pitch_history_, result.pitch_sway_pp_max, result.pitch_sway_pp_mean, result.pitch_damping_ratio)) {
+        return false;
+    }
+
+    return true;
+}
+
+void Monitor::CheckFailureEvents() noexcept {
+    const auto events = imu_.get_motion_events();
+    if (events.free_fall) {
+        PublishFailure(FailureEvent::FreeFall);
+    }
+
+#if CONFIG_MONITOR_AE_MODE_GPIO
+    if (ae_gpio_event_) {
+        ae_gpio_event_ = false;
+        PublishFailure(FailureEvent::AcousticEmission);
+    }
+#else
+    if (!adc_initialized_ || adc_handle_ == nullptr) {
+        return;
+    }
+
+    int raw = 0;
+    const auto handle = static_cast<adc_oneshot_unit_handle_t>(adc_handle_);
+    if (adc_oneshot_read(handle,
+                         static_cast<adc_channel_t>(config_.ae_adc_channel),
+                         &raw) == ESP_OK) {
+        if (raw >= config_.ae_adc_threshold) {
+            PublishFailure(FailureEvent::AcousticEmission);
+        }
+    }
+#endif
+}
+
+void Monitor::PublishFailure(FailureEvent event) noexcept {
+    if (failure_callback_ == nullptr) {
+        return;
+    }
+
+    FailureResult result{};
+    result.event = event;
+    result.timestamp_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    failure_callback_(failure_callback_ctx_, result);
+}
+
 std::size_t Monitor::BufferSize() const noexcept {
     return (sample_count_ < kStorageSamples) ? sample_count_ : kStorageSamples;
 }
@@ -205,6 +463,13 @@ std::size_t Monitor::StartIndex() const noexcept {
 
 std::size_t Monitor::PhysicalIndex(std::size_t logical_index) const noexcept {
     return (StartIndex() + logical_index) % kStorageSamples;
+}
+
+void IRAM_ATTR Monitor::AeGpioIsr(void* arg) noexcept {
+    auto* self = static_cast<Monitor*>(arg);
+    if (self != nullptr) {
+        self->ae_gpio_event_ = true;
+    }
 }
 
 } // namespace monitor
