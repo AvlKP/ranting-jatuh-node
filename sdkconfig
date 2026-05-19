@@ -2253,6 +2253,14 @@ CONFIG_WIFI_PROV_STA_ALL_CHANNEL_SCAN=y
 # end of Wi-Fi Provisioning Manager
 
 #
+# Application Storage
+#
+CONFIG_APP_SD_INTERFACE_SDMMC=y
+# CONFIG_APP_SD_INTERFACE_SPI is not set
+CONFIG_APP_SD_MOUNT_POINT="/sdcard"
+# end of Application Storage
+
+#
 # Logger
 #
 # CONFIG_LOGGER_SERIAL_OUTPUT is not set
@@ -2267,9 +2275,6 @@ CONFIG_LOGGER_MQTT_CLIENT_ID="ranting-logger"
 CONFIG_LOGGER_MQTT_TOPIC_PARAMETERS="ranting/parameters"
 CONFIG_LOGGER_MQTT_TOPIC_FAILURES="ranting/failures"
 CONFIG_LOGGER_MQTT_QOS=0
-CONFIG_LOGGER_SD_INTERFACE_SDMMC=y
-# CONFIG_LOGGER_SD_INTERFACE_SPI is not set
-CONFIG_LOGGER_SD_MOUNT_POINT="/sdcard"
 # end of Logger
 
 #

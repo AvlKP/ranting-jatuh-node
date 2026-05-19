@@ -1,0 +1,19 @@
+menu "Application Storage"
+
+choice APP_SD_INTERFACE
+    prompt "SD card interface"
+    default APP_SD_INTERFACE_SDMMC
+
+config APP_SD_INTERFACE_SDMMC
+    bool "SDMMC 1-bit"
+
+config APP_SD_INTERFACE_SPI
+    bool "SPI (SDSPI)"
+
+endchoice
+
+config APP_SD_MOUNT_POINT
+    string "SD card mount point"
+    default "/sdcard"
+
+endmenu

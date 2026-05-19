@@ -31,7 +31,7 @@ struct TimeInfo {
                                     CsvLine& line) noexcept;
 
 namespace storage {
-[[nodiscard]] bool Init() noexcept;
+void SetMountPoint(const char* mount_point) noexcept;
 [[nodiscard]] bool AppendParameter(const TimeInfo& time_info, const CsvLine& line) noexcept;
 [[nodiscard]] bool AppendFailure(const TimeInfo& time_info, const CsvLine& line) noexcept;
 } // namespace storage

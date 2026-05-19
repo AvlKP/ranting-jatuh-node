@@ -54,20 +54,4 @@ config LOGGER_MQTT_QOS
     default 0
     range 0 2
 
-choice LOGGER_SD_INTERFACE
-    prompt "SD card interface"
-    default LOGGER_SD_INTERFACE_SDMMC
-
-config LOGGER_SD_INTERFACE_SDMMC
-    bool "SDMMC 1-bit"
-
-config LOGGER_SD_INTERFACE_SPI
-    bool "SPI (SDSPI)"
-
-endchoice
-
-config LOGGER_SD_MOUNT_POINT
-    string "SD card mount point"
-    default "/sdcard"
-
 endmenu

@@ -1,10 +1,12 @@
 #include "logger.hpp"
 #include "logger_internal.hpp"
 
+#include <array>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
 
+#include "esp_timer.h"
 #include "sdkconfig.h"
 
 namespace logger {
@@ -12,10 +14,9 @@ namespace logger {
 namespace {
 
 constexpr std::size_t kPendingParamsMax = 32U;
-constexpr TickType_t kLoggerTaskPriority = tskIDLE_PRIORITY + 1;
 constexpr std::uint32_t kMinValidEpoch = 1672531200U;
-constexpr std::uint32_t kPublishPeriodSec =
-    static_cast<std::uint32_t>(CONFIG_LOGGER_WIFI_PERIOD_HOURS) * 3600U;
+constexpr std::uint64_t kPublishPeriodUs =
+    static_cast<std::uint64_t>(CONFIG_LOGGER_WIFI_PERIOD_HOURS) * 3600ULL * 1000000ULL;
 
 struct PendingParamsBuffer {
     std::array<CsvLine, kPendingParamsMax> lines{};
@@ -24,6 +25,18 @@ struct PendingParamsBuffer {
 };
 
 PendingParamsBuffer g_pending_params{};
+
+void AppendPendingParameter(const CsvLine& line) {
+    if (g_pending_params.count == kPendingParamsMax) {
+        g_pending_params.head = (g_pending_params.head + 1U) % kPendingParamsMax;
+        --g_pending_params.count;
+        std::printf("logger: pending parameter buffer full, drop oldest\n");
+    }
+
+    const std::size_t tail = (g_pending_params.head + g_pending_params.count) % kPendingParamsMax;
+    g_pending_params.lines[tail] = line;
+    ++g_pending_params.count;
+}
 
 } // namespace
 
@@ -124,49 +137,57 @@ bool FormatFailureCsv(const monitor::FailureResult& result,
     return true;
 }
 
-bool Logger::Init() noexcept {
-    if (queue_ != nullptr) {
-        return true;
-    }
-
-    queue_ = xQueueCreateStatic(static_cast<UBaseType_t>(kQueueDepth),
-                                sizeof(Event),
-                                queue_storage_.data(),
-                                &queue_buffer_);
-    return queue_ != nullptr;
-}
-
-bool Logger::Start() noexcept {
-    if (started_) {
-        return true;
-    }
-
-    if (queue_ == nullptr && !Init()) {
-        std::printf("logger: queue init failed\n");
+bool Logger::Init(const Config& config) noexcept {
+    if (config.sd_mount_point == nullptr || std::strlen(config.sd_mount_point) == 0U) {
+        std::printf("logger: sd mount point not set\n");
         return false;
     }
 
-    TaskHandle_t task = xTaskCreateStatic(&Logger::TaskThunk,
-                                          "logger",
-                                          static_cast<uint32_t>(kTaskStackWords),
-                                          this,
-                                          kLoggerTaskPriority,
-                                          task_stack_.data(),
-                                          &task_buffer_);
-    if (task == nullptr) {
-        std::printf("logger: task create failed\n");
-        return false;
+    sd_mount_point_ = config.sd_mount_point;
+    storage::SetMountPoint(sd_mount_point_);
+
+    if (!mqtt::Init()) {
+        std::printf("logger: mqtt init failed\n");
     }
 
-    started_ = true;
+    const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    next_publish_us_ = now_us + kPublishPeriodUs;
     return true;
 }
 
 bool Logger::Enqueue(const Event& event) noexcept {
-    if (queue_ == nullptr) {
+    if (kQueueDepth == 0U) {
         return false;
     }
-    return xQueueSend(queue_, &event, 0) == pdTRUE;
+
+    if (queue_count_ == kQueueDepth) {
+        const Event& dropped = queue_[queue_head_];
+        ++dropped_events_;
+        if (dropped.type == EventType::Failure) {
+            ++dropped_failures_;
+        } else {
+            ++dropped_parameters_;
+        }
+        std::printf("logger: event buffer full, drop oldest\n");
+        queue_head_ = (queue_head_ + 1U) % kQueueDepth;
+        --queue_count_;
+    }
+
+    const std::size_t tail = (queue_head_ + queue_count_) % kQueueDepth;
+    queue_[tail] = event;
+    ++queue_count_;
+    return true;
+}
+
+bool Logger::Dequeue(Event& event) noexcept {
+    if (queue_count_ == 0U) {
+        return false;
+    }
+
+    event = queue_[queue_head_];
+    queue_head_ = (queue_head_ + 1U) % kQueueDepth;
+    --queue_count_;
+    return true;
 }
 
 void Logger::HandleMonitorEvent(const monitor::MonitorResult& result) noexcept {
@@ -207,100 +228,66 @@ void Logger::FailureCallback(void* ctx, const monitor::FailureResult& result) no
     static_cast<Logger*>(ctx)->HandleFailureEvent(result);
 }
 
-void Logger::TaskThunk(void* ctx) {
-    if (ctx == nullptr) {
-        vTaskDelete(nullptr);
-        return;
-    }
+void Logger::Poll() noexcept {
+    Event event{};
+    if (Dequeue(event)) {
+        if (event.type == EventType::Parameters) {
+            TimeInfo time_info{};
+            time_info.timestamp_us = event.monitor.timestamp_us;
+            static_cast<void>(BuildTimeInfo(time_info));
 
-    static_cast<Logger*>(ctx)->TaskLoop();
-}
-
-void Logger::TaskLoop() noexcept {
-    if (!storage::Init()) {
-        std::printf("logger: storage init failed\n");
-    }
-    if (!mqtt::Init()) {
-        std::printf("logger: mqtt init failed\n");
-    }
-
-    const TickType_t publish_period_ticks =
-        pdMS_TO_TICKS(static_cast<std::uint64_t>(kPublishPeriodSec) * 1000ULL);
-    TickType_t next_publish = xTaskGetTickCount() + publish_period_ticks;
-
-    while (true) {
-        Event event{};
-        const TickType_t now = xTaskGetTickCount();
-        const TickType_t wait = (now < next_publish) ? (next_publish - now) : 0U;
-        const bool got_event = xQueueReceive(queue_, &event, wait) == pdTRUE;
-
-        if (got_event) {
-            if (event.type == EventType::Parameters) {
-                TimeInfo time_info{};
-                time_info.timestamp_us = event.monitor.timestamp_us;
-                static_cast<void>(BuildTimeInfo(time_info));
-
-                CsvLine line{};
-                if (!FormatParameterCsv(event.monitor, time_info, line)) {
-                    std::printf("logger: format parameter csv failed\n");
-                } else {
-                    if (!storage::AppendParameter(time_info, line)) {
-                        std::printf("logger: parameter storage write failed\n");
-                    }
-#if CONFIG_LOGGER_SERIAL_OUTPUT
-                    std::printf("%s", line.buffer.data());
-#endif
-                    if (g_pending_params.count == kPendingParamsMax) {
-                        g_pending_params.head = (g_pending_params.head + 1U) % kPendingParamsMax;
-                        --g_pending_params.count;
-                        std::printf("logger: pending parameter buffer full, drop oldest\n");
-                    }
-
-                    const std::size_t tail = (g_pending_params.head + g_pending_params.count) %
-                        kPendingParamsMax;
-                    g_pending_params.lines[tail] = line;
-                    ++g_pending_params.count;
-                }
+            CsvLine line{};
+            if (!FormatParameterCsv(event.monitor, time_info, line)) {
+                std::printf("logger: format parameter csv failed\n");
             } else {
-                TimeInfo time_info{};
-                time_info.timestamp_us = event.failure.timestamp_us;
-                static_cast<void>(BuildTimeInfo(time_info));
-
-                CsvLine line{};
-                if (!FormatFailureCsv(event.failure, time_info, line)) {
-                    std::printf("logger: format failure csv failed\n");
-                } else {
-                    if (!storage::AppendFailure(time_info, line)) {
-                        std::printf("logger: failure storage write failed\n");
-                    }
+                if (!storage::AppendParameter(time_info, line)) {
+                    std::printf("logger: parameter storage write failed\n");
+                }
 #if CONFIG_LOGGER_SERIAL_OUTPUT
-                    std::printf("%s", line.buffer.data());
+                std::printf("%s", line.buffer.data());
 #endif
-                    if (!mqtt::PublishFailure(line)) {
-                        std::printf("logger: failure mqtt publish failed\n");
-                    }
+                AppendPendingParameter(line);
+            }
+        } else {
+            TimeInfo time_info{};
+            time_info.timestamp_us = event.failure.timestamp_us;
+            static_cast<void>(BuildTimeInfo(time_info));
+
+            CsvLine line{};
+            if (!FormatFailureCsv(event.failure, time_info, line)) {
+                std::printf("logger: format failure csv failed\n");
+            } else {
+                if (!mqtt::PublishFailure(line)) {
+                    std::printf("logger: failure mqtt publish failed\n");
                 }
+                if (!storage::AppendFailure(time_info, line)) {
+                    std::printf("logger: failure storage write failed\n");
+                }
+#if CONFIG_LOGGER_SERIAL_OUTPUT
+                std::printf("%s", line.buffer.data());
+#endif
+            }
+        }
+    }
+
+    const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    if (now_us >= next_publish_us_) {
+        if (g_pending_params.count > 0U) {
+            std::array<CsvLine, kPendingParamsMax> batch{};
+            for (std::size_t i = 0U; i < g_pending_params.count; ++i) {
+                const std::size_t idx = (g_pending_params.head + i) % kPendingParamsMax;
+                batch[i] = g_pending_params.lines[idx];
+            }
+
+            if (mqtt::PublishParameters(batch.data(), g_pending_params.count)) {
+                g_pending_params.head = 0U;
+                g_pending_params.count = 0U;
+            } else {
+                std::printf("logger: parameter mqtt publish failed\n");
             }
         }
 
-        if (xTaskGetTickCount() >= next_publish) {
-            if (g_pending_params.count > 0U) {
-                std::array<CsvLine, kPendingParamsMax> batch{};
-                for (std::size_t i = 0U; i < g_pending_params.count; ++i) {
-                    const std::size_t idx = (g_pending_params.head + i) % kPendingParamsMax;
-                    batch[i] = g_pending_params.lines[idx];
-                }
-
-                if (mqtt::PublishParameters(batch.data(), g_pending_params.count)) {
-                    g_pending_params.head = 0U;
-                    g_pending_params.count = 0U;
-                } else {
-                    std::printf("logger: parameter mqtt publish failed\n");
-                }
-            }
-
-            next_publish = xTaskGetTickCount() + publish_period_ticks;
-        }
+        next_publish_us_ = now_us + kPublishPeriodUs;
     }
 }
 

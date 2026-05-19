@@ -4,20 +4,23 @@
 #include <cstddef>
 #include <cstdint>
 #include "monitor.hpp"
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/task.h"
 
 namespace logger {
 
 class Logger {
 public:
-    [[nodiscard]] bool Init() noexcept;
-    [[nodiscard]] bool Start() noexcept;
+    struct Config {
+        const char* sd_mount_point{nullptr};
+    };
+
+    [[nodiscard]] bool Init(const Config& config) noexcept;
     void HandleMonitorEvent(const monitor::MonitorResult& result) noexcept;
     void HandleFailureEvent(const monitor::FailureResult& result) noexcept;
     static void MonitorCallback(void* ctx, const monitor::MonitorResult& result) noexcept;
     static void FailureCallback(void* ctx, const monitor::FailureResult& result) noexcept;
+    // Superloop note: SD/MQTT IO can block and add jitter; call Poll often.
+    // RTOS task+queue isolates IO, keeps monitor loop deterministic, and avoids long stalls.
+    void Poll() noexcept;
 
 private:
     enum class EventType : std::uint8_t {
@@ -31,25 +34,19 @@ private:
         monitor::FailureResult failure{};
     };
 
-    static void TaskThunk(void* ctx);
-    void TaskLoop() noexcept;
     [[nodiscard]] bool Enqueue(const Event& event) noexcept;
+    [[nodiscard]] bool Dequeue(Event& event) noexcept;
 
     static constexpr std::size_t kQueueDepth = 16U;
-    static constexpr std::size_t kTaskStackBytes = 4096U;
-    static constexpr std::size_t kTaskStackWords = kTaskStackBytes / sizeof(StackType_t);
-
-    StaticQueue_t queue_buffer_{};
-    QueueHandle_t queue_{nullptr};
-    std::array<std::uint8_t, kQueueDepth * sizeof(Event)> queue_storage_{};
-
-    StaticTask_t task_buffer_{};
-    std::array<StackType_t, kTaskStackWords> task_stack_{};
+    std::array<Event, kQueueDepth> queue_{};
+    std::size_t queue_head_{0U};
+    std::size_t queue_count_{0U};
 
     std::uint32_t dropped_events_{0U};
     std::uint32_t dropped_parameters_{0U};
     std::uint32_t dropped_failures_{0U};
-    bool started_{false};
+    std::uint64_t next_publish_us_{0U};
+    const char* sd_mount_point_{nullptr};
 };
 
 } // namespace logger

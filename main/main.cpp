@@ -5,7 +5,13 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
+#include "driver/sdmmc_host.h"
+#include "driver/sdspi_host.h"
+#include "driver/spi_common.h"
 #include "esp_adc/adc_oneshot.h"
+#include "esp_err.h"
+#include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
 
 #include "pins.hpp"
 #include "monitor.hpp"
@@ -16,9 +22,12 @@ namespace {
 constexpr std::uint8_t kImuAddress = 0x6A;
 constexpr std::uint32_t kI2cTimeoutMs = 100U;
 constexpr std::size_t kMaxI2cWrite = 8U;
+constexpr std::uint32_t kSdAllocUnit = 16U * 1024U;
+constexpr int kSdMaxFiles = 5;
 
 i2c_master_bus_handle_t g_i2c_bus = nullptr;
 i2c_master_dev_handle_t g_imu_dev = nullptr;
+sdmmc_card_t* g_sd_card = nullptr;
 
 bool InitImuI2c() {
     i2c_master_bus_config_t bus_cfg{};
@@ -87,6 +96,67 @@ bool MapImuOdr(std::uint32_t rate_hz,
     }
 }
 
+bool InitSdCard() {
+    esp_vfs_fat_sdmmc_mount_config_t mount_config{};
+    mount_config.format_if_mount_failed = false;
+    mount_config.max_files = kSdMaxFiles;
+    mount_config.allocation_unit_size = kSdAllocUnit;
+
+#if CONFIG_APP_SD_INTERFACE_SDMMC
+    sdmmc_host_t host = SDMMC_HOST_DEFAULT();
+    host.flags = SDMMC_HOST_FLAG_1BIT;
+    sdmmc_slot_config_t slot_config = SDMMC_SLOT_CONFIG_DEFAULT();
+    slot_config.width = 1;
+    slot_config.clk = pins::SD_CLK;
+    slot_config.cmd = pins::SD_CMD_DI;
+    slot_config.d0 = pins::SD_DAT0_DO;
+
+    const esp_err_t err = esp_vfs_fat_sdmmc_mount(CONFIG_APP_SD_MOUNT_POINT,
+                                                  &host,
+                                                  &slot_config,
+                                                  &mount_config,
+                                                  &g_sd_card);
+    if (err != ESP_OK) {
+        std::printf("app: sdmmc mount failed: %s\n", esp_err_to_name(err));
+        return false;
+    }
+#else
+    sdmmc_host_t host = SDSPI_HOST_DEFAULT();
+    spi_bus_config_t bus_cfg{};
+    bus_cfg.mosi_io_num = pins::SD_CMD_DI;
+    bus_cfg.miso_io_num = pins::SD_DAT0_DO;
+    bus_cfg.sclk_io_num = pins::SD_CLK;
+    bus_cfg.quadwp_io_num = -1;
+    bus_cfg.quadhd_io_num = -1;
+    bus_cfg.max_transfer_sz = static_cast<int>(kSdAllocUnit);
+
+    esp_err_t err = spi_bus_initialize(static_cast<spi_host_device_t>(host.slot),
+                                       &bus_cfg,
+                                       SPI_DMA_CH_AUTO);
+    if (err != ESP_OK) {
+        std::printf("app: sdspi bus init failed: %s\n", esp_err_to_name(err));
+        return false;
+    }
+
+    sdspi_device_config_t slot_config = SDSPI_DEVICE_CONFIG_DEFAULT();
+    slot_config.gpio_cs = pins::SD_DAT3_CS;
+    slot_config.host_id = static_cast<spi_host_device_t>(host.slot);
+
+    err = esp_vfs_fat_sdspi_mount(CONFIG_APP_SD_MOUNT_POINT,
+                                  &host,
+                                  &slot_config,
+                                  &mount_config,
+                                  &g_sd_card);
+    if (err != ESP_OK) {
+        std::printf("app: sdspi mount failed: %s\n", esp_err_to_name(err));
+        spi_bus_free(static_cast<spi_host_device_t>(host.slot));
+        return false;
+    }
+#endif
+
+    return true;
+}
+
 } // namespace
 
 extern "C" void app_main(void) {
@@ -115,13 +185,16 @@ extern "C" void app_main(void) {
         return;
     }
 
-    static logger::Logger logger{};
-    if (!logger.Init()) {
-        std::printf("logger: init failed\n");
+    if (!InitSdCard()) {
+        std::printf("app: sd card init failed\n");
         return;
     }
-    if (!logger.Start()) {
-        std::printf("logger: start failed\n");
+
+    static logger::Logger logger{};
+    logger::Logger::Config logger_cfg{};
+    logger_cfg.sd_mount_point = CONFIG_APP_SD_MOUNT_POINT;
+    if (!logger.Init(logger_cfg)) {
+        std::printf("logger: init failed\n");
         return;
     }
     monitor.RegisterCallback(&logger::Logger::MonitorCallback, &logger);
@@ -136,6 +209,7 @@ extern "C" void app_main(void) {
         if (!monitor.Update(dt_s)) {
             std::printf("monitor: update failed\n");
         }
+        logger.Poll();
         vTaskDelay(period_ticks);
     }
 }
