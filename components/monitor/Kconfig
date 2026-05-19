@@ -1,0 +1,17 @@
+menu "Monitor"
+
+config MONITOR_STORAGE_MINUTES
+    int "Tilt data storage minutes"
+    default 5
+    range 1 60
+    help
+        Number of minutes of tilt data stored for statistics and FFT.
+
+config MONITOR_IMU_RATE_HZ
+    int "IMU sampling rate (Hz)"
+    default 26
+    range 1 208
+    help
+        Target IMU sampling rate in Hz for monitor processing loop.
+
+endmenu

@@ -1,2 +1,5 @@
 .vscode/
 build/
+.agents/
+.github/
+managed_components/

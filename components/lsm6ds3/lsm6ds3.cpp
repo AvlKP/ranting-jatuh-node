@@ -116,6 +116,26 @@ bool Lsm6ds3::read_fifo_dataset(lsm6ds3::Value& out_gyro, lsm6ds3::Value& out_ac
     return true;
 }
 
+bool Lsm6ds3::read_accel_gyro(lsm6ds3::Value& out_gyro, lsm6ds3::Value& out_accel) {
+    uint8_t data[12];
+    if (!config_.read_cb(static_cast<uint8_t>(lsm6ds3::Register::OUTX_L_G), data, sizeof(data))) {
+        return false;
+    }
+
+    int16_t gx = static_cast<int16_t>((data[1] << 8) | data[0]);
+    int16_t gy = static_cast<int16_t>((data[3] << 8) | data[2]);
+    int16_t gz = static_cast<int16_t>((data[5] << 8) | data[4]);
+
+    int16_t ax = static_cast<int16_t>((data[7] << 8) | data[6]);
+    int16_t ay = static_cast<int16_t>((data[9] << 8) | data[8]);
+    int16_t az = static_cast<int16_t>((data[11] << 8) | data[10]);
+
+    out_gyro = { gx * gyro_sensitivity_, gy * gyro_sensitivity_, gz * gyro_sensitivity_ };
+    out_accel = { ax * accel_sensitivity_, ay * accel_sensitivity_, az * accel_sensitivity_ };
+
+    return true;
+}
+
 // --- 3. Motion Detection ---
 bool Lsm6ds3::configure_motion_detection(uint8_t tap_ths, uint8_t wakeup_ths, uint8_t freefall_ths) {
     if (!write_register(lsm6ds3::Register::TAP_CFG, 0x8E)) return false; // Enable interrupts and XYZ tap

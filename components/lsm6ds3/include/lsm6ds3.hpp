@@ -87,6 +87,9 @@ public:
     /// @note Requires `configure_fifo` to be set with `0x09` in `CTRL3` (No decimation for both)
     bool read_fifo_dataset(lsm6ds3::Value& out_gyro, lsm6ds3::Value& out_accel);
 
+    /// @brief Reads the latest Gyro + Accel samples from output registers
+    bool read_accel_gyro(lsm6ds3::Value& out_gyro, lsm6ds3::Value& out_accel);
+
     // --- 3. Motion Detection ---
     bool configure_motion_detection(uint8_t tap_ths = 0x09, uint8_t wakeup_ths = 0x02, uint8_t freefall_ths = 0x03);
 
