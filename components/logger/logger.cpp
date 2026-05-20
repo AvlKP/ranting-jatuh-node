@@ -6,6 +6,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "esp_log.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
 
@@ -18,6 +19,8 @@ constexpr std::uint32_t kMinValidEpoch = 1672531200U;
 constexpr std::uint64_t kPublishPeriodUs =
     static_cast<std::uint64_t>(CONFIG_LOGGER_WIFI_PERIOD_HOURS) * 3600ULL * 1000000ULL;
 
+static const char* kTag = "LOGGER";
+
 struct PendingParamsBuffer {
     std::array<CsvLine, kPendingParamsMax> lines{};
     std::size_t head{0U};
@@ -25,12 +28,13 @@ struct PendingParamsBuffer {
 };
 
 PendingParamsBuffer g_pending_params{};
+std::array<CsvLine, kPendingParamsMax> g_publish_batch{};
 
 void AppendPendingParameter(const CsvLine& line) {
     if (g_pending_params.count == kPendingParamsMax) {
         g_pending_params.head = (g_pending_params.head + 1U) % kPendingParamsMax;
         --g_pending_params.count;
-        std::printf("logger: pending parameter buffer full, drop oldest\n");
+        ESP_LOGW(kTag, "Pending parameter buffer full, drop oldest");
     }
 
     const std::size_t tail = (g_pending_params.head + g_pending_params.count) % kPendingParamsMax;
@@ -139,7 +143,7 @@ bool FormatFailureCsv(const monitor::FailureResult& result,
 
 bool Logger::Init(const Config& config) noexcept {
     if (config.sd_mount_point == nullptr || std::strlen(config.sd_mount_point) == 0U) {
-        std::printf("logger: sd mount point not set\n");
+        ESP_LOGE(kTag, "SD mount point not set");
         return false;
     }
 
@@ -147,7 +151,7 @@ bool Logger::Init(const Config& config) noexcept {
     storage::SetMountPoint(sd_mount_point_);
 
     if (!mqtt::Init()) {
-        std::printf("logger: mqtt init failed\n");
+        ESP_LOGE(kTag, "MQTT init failed");
     }
 
     const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
@@ -168,7 +172,7 @@ bool Logger::Enqueue(const Event& event) noexcept {
         } else {
             ++dropped_parameters_;
         }
-        std::printf("logger: event buffer full, drop oldest\n");
+        ESP_LOGW(kTag, "Event buffer full, drop oldest");
         queue_head_ = (queue_head_ + 1U) % kQueueDepth;
         --queue_count_;
     }
@@ -194,10 +198,11 @@ void Logger::HandleMonitorEvent(const monitor::MonitorResult& result) noexcept {
     Event event{};
     event.type = EventType::Parameters;
     event.monitor = result;
+    has_monitor_result_ = true;
     if (!Enqueue(event)) {
         ++dropped_events_;
         ++dropped_parameters_;
-        std::printf("logger: parameter event dropped\n");
+        ESP_LOGW(kTag, "Parameter event dropped");
     }
 }
 
@@ -208,7 +213,7 @@ void Logger::HandleFailureEvent(const monitor::FailureResult& result) noexcept {
     if (!Enqueue(event)) {
         ++dropped_events_;
         ++dropped_failures_;
-        std::printf("logger: failure event dropped\n");
+        ESP_LOGW(kTag, "Failure event dropped");
     }
 }
 
@@ -238,13 +243,15 @@ void Logger::Poll() noexcept {
 
             CsvLine line{};
             if (!FormatParameterCsv(event.monitor, time_info, line)) {
-                std::printf("logger: format parameter csv failed\n");
+                ESP_LOGE(kTag, "Format parameter CSV failed");
             } else {
                 if (!storage::AppendParameter(time_info, line)) {
-                    std::printf("logger: parameter storage write failed\n");
+                    ESP_LOGE(kTag, "Parameter storage write failed");
                 }
 #if CONFIG_LOGGER_SERIAL_OUTPUT
-                std::printf("%s", line.buffer.data());
+                ESP_LOGI(kTag, "param_csv=%.*s",
+                         static_cast<int>(line.length),
+                         line.buffer.data());
 #endif
                 AppendPendingParameter(line);
             }
@@ -255,16 +262,18 @@ void Logger::Poll() noexcept {
 
             CsvLine line{};
             if (!FormatFailureCsv(event.failure, time_info, line)) {
-                std::printf("logger: format failure csv failed\n");
+                ESP_LOGE(kTag, "Format failure CSV failed");
             } else {
                 if (!mqtt::PublishFailure(line)) {
-                    std::printf("logger: failure mqtt publish failed\n");
+                    ESP_LOGE(kTag, "Failure MQTT publish failed");
                 }
                 if (!storage::AppendFailure(time_info, line)) {
-                    std::printf("logger: failure storage write failed\n");
+                    ESP_LOGE(kTag, "Failure storage write failed");
                 }
 #if CONFIG_LOGGER_SERIAL_OUTPUT
-                std::printf("%s", line.buffer.data());
+                ESP_LOGI(kTag, "failure_csv=%.*s",
+                         static_cast<int>(line.length),
+                         line.buffer.data());
 #endif
             }
         }
@@ -273,22 +282,29 @@ void Logger::Poll() noexcept {
     const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
     if (now_us >= next_publish_us_) {
         if (g_pending_params.count > 0U) {
-            std::array<CsvLine, kPendingParamsMax> batch{};
             for (std::size_t i = 0U; i < g_pending_params.count; ++i) {
                 const std::size_t idx = (g_pending_params.head + i) % kPendingParamsMax;
-                batch[i] = g_pending_params.lines[idx];
+                g_publish_batch[i] = g_pending_params.lines[idx];
             }
 
-            if (mqtt::PublishParameters(batch.data(), g_pending_params.count)) {
+            if (mqtt::PublishParameters(g_publish_batch.data(), g_pending_params.count)) {
                 g_pending_params.head = 0U;
                 g_pending_params.count = 0U;
             } else {
-                std::printf("logger: parameter mqtt publish failed\n");
+                ESP_LOGE(kTag, "Parameter MQTT publish failed");
             }
         }
 
         next_publish_us_ = now_us + kPublishPeriodUs;
     }
+}
+
+bool Logger::VerifyMqttPublish(const char* topic, const char* payload) noexcept {
+    return mqtt::PublishRaw(topic, payload, "text/plain");
+}
+
+bool Logger::HasMonitorResult() const noexcept {
+    return has_monitor_result_;
 }
 
 } // namespace logger

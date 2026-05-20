@@ -9,6 +9,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_err.h"
 #include "esp_attr.h"
+#include "esp_log.h"
 
 namespace monitor {
 
@@ -16,6 +17,7 @@ namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kTwoPi = 6.2831853071795864769f;
+static const char* kTag = "MONITOR";
 
 } // namespace
 
@@ -126,6 +128,11 @@ bool Monitor::Update(float dt_s) noexcept {
     return true;
 }
 
+bool Monitor::ReadImuSample(sensor::lsm6ds3::Value& gyro,
+                            sensor::lsm6ds3::Value& accel) noexcept {
+    return ReadImu(gyro, accel);
+}
+
 bool Monitor::ReadImu(sensor::lsm6ds3::Value& gyro,
                       sensor::lsm6ds3::Value& accel) noexcept {
     return imu_.read_accel_gyro(gyro, accel);
@@ -160,22 +167,23 @@ bool Monitor::ComputeAndPublish() noexcept {
     }
 
     if (config_.debug_enabled) {
-        std::printf("monitor_debug: roll_mean=%.3f roll_var=%.3f pitch_mean=%.3f pitch_var=%.3f "
-                    "roll_pp_max=%.3f roll_pp_mean=%.3f pitch_pp_max=%.3f pitch_pp_mean=%.3f "
-                    "roll_zeta=%.4f pitch_zeta=%.4f freq=%.3fHz samples=%u ts_us=%llu\n",
-                    result.roll_mean,
-                    result.roll_variance,
-                    result.pitch_mean,
-                    result.pitch_variance,
-                    result.roll_sway_pp_max,
-                    result.roll_sway_pp_mean,
-                    result.pitch_sway_pp_max,
-                    result.pitch_sway_pp_mean,
-                    result.roll_damping_ratio,
-                    result.pitch_damping_ratio,
-                    result.natural_freq_hz,
-                    static_cast<unsigned>(result.sample_count),
-                    static_cast<unsigned long long>(result.timestamp_us));
+        ESP_LOGI(kTag,
+                 "roll_mean=%.3f roll_var=%.3f pitch_mean=%.3f pitch_var=%.3f "
+                 "roll_pp_max=%.3f roll_pp_mean=%.3f pitch_pp_max=%.3f pitch_pp_mean=%.3f "
+                 "roll_zeta=%.4f pitch_zeta=%.4f freq=%.3fHz samples=%u ts_us=%llu",
+                 result.roll_mean,
+                 result.roll_variance,
+                 result.pitch_mean,
+                 result.pitch_variance,
+                 result.roll_sway_pp_max,
+                 result.roll_sway_pp_mean,
+                 result.pitch_sway_pp_max,
+                 result.pitch_sway_pp_mean,
+                 result.roll_damping_ratio,
+                 result.pitch_damping_ratio,
+                 result.natural_freq_hz,
+                 static_cast<unsigned>(result.sample_count),
+                 static_cast<unsigned long long>(result.timestamp_us));
     }
 
     if (callback_ != nullptr) {

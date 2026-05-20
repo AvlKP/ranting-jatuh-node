@@ -71,6 +71,8 @@ public:
     void RegisterCallback(EventCb cb, void* ctx) noexcept;
     void RegisterFailureCallback(FailureCb cb, void* ctx) noexcept;
     [[nodiscard]] bool Update(float dt_s) noexcept;
+    [[nodiscard]] bool ReadImuSample(sensor::lsm6ds3::Value& gyro,
+                                     sensor::lsm6ds3::Value& accel) noexcept;
 
 private:
     [[nodiscard]] bool ReadImu(sensor::lsm6ds3::Value& gyro,

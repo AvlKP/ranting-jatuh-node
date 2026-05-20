@@ -4,7 +4,7 @@ config LOGGER_SERIAL_OUTPUT
     bool "Enable serial output"
     default n
     help
-        Print received parameters and failure events over UART.
+        Log received parameters and failure events using ESP_LOG (UART output).
 
 config LOGGER_WIFI_PERIOD_HOURS
     int "WiFi/MQTT publish period (hours)"

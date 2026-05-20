@@ -40,6 +40,7 @@ namespace mqtt {
 [[nodiscard]] bool Init() noexcept;
 [[nodiscard]] bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept;
 [[nodiscard]] bool PublishFailure(const CsvLine& line) noexcept;
+[[nodiscard]] bool PublishRaw(const char* topic, const char* payload, const char* content_type) noexcept;
 } // namespace mqtt
 
 } // namespace logger

@@ -21,6 +21,8 @@ public:
     // Superloop note: SD/MQTT IO can block and add jitter; call Poll often.
     // RTOS task+queue isolates IO, keeps monitor loop deterministic, and avoids long stalls.
     void Poll() noexcept;
+    [[nodiscard]] bool VerifyMqttPublish(const char* topic, const char* payload) noexcept;
+    [[nodiscard]] bool HasMonitorResult() const noexcept;
 
 private:
     enum class EventType : std::uint8_t {
@@ -47,6 +49,7 @@ private:
     std::uint32_t dropped_failures_{0U};
     std::uint64_t next_publish_us_{0U};
     const char* sd_mount_point_{nullptr};
+    bool has_monitor_result_{false};
 };
 
 } // namespace logger

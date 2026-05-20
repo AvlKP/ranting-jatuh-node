@@ -17,3 +17,20 @@ config APP_SD_MOUNT_POINT
     default "/sdcard"
 
 endmenu
+
+menu "Application Verification"
+
+config APP_VERIFY_ENABLE
+    bool "Enable startup verification"
+    default y
+
+config APP_VERIFY_MQTT_TOPIC
+    string "MQTT verify topic"
+    default "ranting/verify"
+
+config APP_VERIFY_MONITOR_TIMEOUT_MS
+    int "Monitor verify timeout (ms)"
+    default 5000
+    range 100 600000
+
+endmenu

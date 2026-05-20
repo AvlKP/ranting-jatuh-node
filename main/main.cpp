@@ -1,6 +1,8 @@
 #include <cstdint>
 #include <array>
+#include <cerrno>
 #include <cstdio>
+#include <cstring>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -10,6 +12,8 @@
 #include "driver/spi_common.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_err.h"
+#include "esp_log.h"
+#include "esp_timer.h"
 #include "esp_vfs_fat.h"
 #include "sdmmc_cmd.h"
 
@@ -24,6 +28,10 @@ constexpr std::uint32_t kI2cTimeoutMs = 100U;
 constexpr std::size_t kMaxI2cWrite = 8U;
 constexpr std::uint32_t kSdAllocUnit = 16U * 1024U;
 constexpr int kSdMaxFiles = 5;
+constexpr std::uint32_t kVerifyReadBuffer = 32U;
+
+static const char* kAppTag = "APP";
+static const char* kVerifyTag = "VERIFY";
 
 i2c_master_bus_handle_t g_i2c_bus = nullptr;
 i2c_master_dev_handle_t g_imu_dev = nullptr;
@@ -117,7 +125,7 @@ bool InitSdCard() {
                                                   &mount_config,
                                                   &g_sd_card);
     if (err != ESP_OK) {
-        std::printf("app: sdmmc mount failed: %s\n", esp_err_to_name(err));
+        ESP_LOGE(kAppTag, "SDMMC mount failed: %s", esp_err_to_name(err));
         return false;
     }
 #else
@@ -134,7 +142,7 @@ bool InitSdCard() {
                                        &bus_cfg,
                                        SPI_DMA_CH_AUTO);
     if (err != ESP_OK) {
-        std::printf("app: sdspi bus init failed: %s\n", esp_err_to_name(err));
+        ESP_LOGE(kAppTag, "SDSPI bus init failed: %s", esp_err_to_name(err));
         return false;
     }
 
@@ -148,7 +156,7 @@ bool InitSdCard() {
                                   &mount_config,
                                   &g_sd_card);
     if (err != ESP_OK) {
-        std::printf("app: sdspi mount failed: %s\n", esp_err_to_name(err));
+        ESP_LOGE(kAppTag, "SDSPI mount failed: %s", esp_err_to_name(err));
         spi_bus_free(static_cast<spi_host_device_t>(host.slot));
         return false;
     }
@@ -157,11 +165,110 @@ bool InitSdCard() {
     return true;
 }
 
+void LogStackHighWatermark(const char* stage) {
+    const UBaseType_t words = uxTaskGetStackHighWaterMark(nullptr);
+    const std::uint32_t bytes = static_cast<std::uint32_t>(words) * sizeof(StackType_t);
+    ESP_LOGI(kVerifyTag, "%s stack high-water: %u bytes", stage, bytes);
+}
+
+bool VerifySdStorage() {
+    std::array<char, 96U> path{};
+    const int len = std::snprintf(path.data(),
+                                  path.size(),
+                                  "%s/verify.txt",
+                                  CONFIG_APP_SD_MOUNT_POINT);
+    if (len <= 0 || static_cast<std::size_t>(len) >= path.size()) {
+        ESP_LOGE(kVerifyTag, "Verify path build failed");
+        return false;
+    }
+
+    const char* payload = "verify_ok";
+    const std::size_t payload_len = std::strlen(payload);
+
+    FILE* file = std::fopen(path.data(), "w");
+    if (file == nullptr) {
+        ESP_LOGE(kVerifyTag, "Verify write open failed: %s errno=%d (%s)",
+                 path.data(),
+                 errno,
+                 std::strerror(errno));
+        return false;
+    }
+    const std::size_t written = std::fwrite(payload, 1U, payload_len, file);
+    std::fclose(file);
+    if (written != payload_len) {
+        ESP_LOGE(kVerifyTag, "Verify write failed: %s errno=%d (%s)",
+                 path.data(),
+                 errno,
+                 std::strerror(errno));
+        return false;
+    }
+
+    file = std::fopen(path.data(), "r");
+    if (file == nullptr) {
+        ESP_LOGE(kVerifyTag, "Verify read open failed: %s errno=%d (%s)",
+                 path.data(),
+                 errno,
+                 std::strerror(errno));
+        return false;
+    }
+
+    std::array<char, kVerifyReadBuffer> buffer{};
+    const std::size_t read = std::fread(buffer.data(), 1U, payload_len, file);
+    std::fclose(file);
+    if (read != payload_len || std::strncmp(buffer.data(), payload, payload_len) != 0) {
+        ESP_LOGE(kVerifyTag, "Verify read mismatch: %s", path.data());
+        return false;
+    }
+
+    ESP_LOGI(kVerifyTag, "Storage verify ok: %s", path.data());
+    return true;
+}
+
+bool VerifyMqtt(logger::Logger& logger) {
+    const char* topic = CONFIG_APP_VERIFY_MQTT_TOPIC;
+    if (topic == nullptr || std::strlen(topic) == 0U) {
+        ESP_LOGE(kVerifyTag, "MQTT verify topic not set");
+        return false;
+    }
+
+    const bool ok = logger.VerifyMqttPublish(topic, "verify_ok");
+    if (ok) {
+        ESP_LOGI(kVerifyTag, "MQTT verify publish ok: %s", topic);
+    } else {
+        ESP_LOGE(kVerifyTag, "MQTT verify publish failed: %s", topic);
+    }
+    return ok;
+}
+
+bool VerifyMonitorOutput(monitor::Monitor& monitor,
+                         logger::Logger& logger,
+                         float dt_s,
+                         TickType_t period_ticks) {
+    const std::uint64_t start_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    const std::uint64_t timeout_us =
+        static_cast<std::uint64_t>(CONFIG_APP_VERIFY_MONITOR_TIMEOUT_MS) * 1000ULL;
+
+    while ((static_cast<std::uint64_t>(esp_timer_get_time()) - start_us) < timeout_us) {
+        if (!monitor.Update(dt_s)) {
+            ESP_LOGW(kVerifyTag, "Monitor update failed during verify");
+        }
+        logger.Poll();
+        if (logger.HasMonitorResult()) {
+            ESP_LOGI(kVerifyTag, "Monitor verify ok");
+            return true;
+        }
+        vTaskDelay(period_ticks);
+    }
+
+    ESP_LOGW(kVerifyTag, "Monitor verify timeout");
+    return false;
+}
+
 } // namespace
 
 extern "C" void app_main(void) {
     if (!InitImuI2c()) {
-        std::printf("monitor: i2c init failed\n");
+        ESP_LOGE(kAppTag, "I2C init failed");
         return;
     }
 
@@ -169,7 +276,7 @@ extern "C" void app_main(void) {
     if (!MapImuOdr(static_cast<std::uint32_t>(CONFIG_MONITOR_IMU_RATE_HZ),
                    imu_cfg.imu_config.accel_odr,
                    imu_cfg.imu_config.gyro_odr)) {
-        std::printf("monitor: unsupported IMU rate %d Hz\n", CONFIG_MONITOR_IMU_RATE_HZ);
+        ESP_LOGE(kAppTag, "Unsupported IMU rate %d Hz", CONFIG_MONITOR_IMU_RATE_HZ);
         return;
     }
     imu_cfg.read_cb = ImuReadReg;
@@ -181,12 +288,12 @@ extern "C" void app_main(void) {
 
     static monitor::Monitor monitor{imu_cfg, monitor_cfg};
     if (!monitor.Init()) {
-        std::printf("monitor: init failed\n");
+        ESP_LOGE(kAppTag, "Monitor init failed");
         return;
     }
 
     if (!InitSdCard()) {
-        std::printf("app: sd card init failed\n");
+        ESP_LOGE(kAppTag, "SD card init failed");
         return;
     }
 
@@ -194,7 +301,7 @@ extern "C" void app_main(void) {
     logger::Logger::Config logger_cfg{};
     logger_cfg.sd_mount_point = CONFIG_APP_SD_MOUNT_POINT;
     if (!logger.Init(logger_cfg)) {
-        std::printf("logger: init failed\n");
+        ESP_LOGE(kAppTag, "Logger init failed");
         return;
     }
     monitor.RegisterCallback(&logger::Logger::MonitorCallback, &logger);
@@ -205,9 +312,31 @@ extern "C" void app_main(void) {
     const std::uint32_t period_ms = (1000U + rate_hz - 1U) / rate_hz;
     const TickType_t period_ticks = pdMS_TO_TICKS(period_ms);
 
+#if CONFIG_APP_VERIFY_ENABLE
+    ESP_LOGI(kVerifyTag, "Verification start");
+    LogStackHighWatermark("startup");
+
+    sensor::lsm6ds3::Value gyro{};
+    sensor::lsm6ds3::Value accel{};
+    if (monitor.ReadImuSample(gyro, accel)) {
+        ESP_LOGI(kVerifyTag,
+                 "IMU sample accel=(%.3f, %.3f, %.3f) gyro=(%.3f, %.3f, %.3f)",
+                 accel.x, accel.y, accel.z,
+                 gyro.x, gyro.y, gyro.z);
+    } else {
+        ESP_LOGE(kVerifyTag, "IMU sample read failed");
+    }
+
+    static_cast<void>(VerifySdStorage());
+    static_cast<void>(VerifyMqtt(logger));
+    static_cast<void>(VerifyMonitorOutput(monitor, logger, dt_s, period_ticks));
+    LogStackHighWatermark("post-verify");
+    ESP_LOGI(kVerifyTag, "Verification end");
+#endif
+
     while (true) {
         if (!monitor.Update(dt_s)) {
-            std::printf("monitor: update failed\n");
+            ESP_LOGW(kAppTag, "Monitor update failed");
         }
         logger.Poll();
         vTaskDelay(period_ticks);

@@ -6,6 +6,7 @@
 
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_log.h"
 #include "esp_netif.h"
 #include "esp_sntp.h"
 #include "esp_wifi.h"
@@ -43,6 +44,8 @@ esp_mqtt_client_handle_t s_client = nullptr;
 
 esp_mqtt5_connection_property_config_t s_connect_property{};
 esp_mqtt5_publish_property_config_t s_publish_property{};
+
+static const char* kTag = "LOGGER_MQTT";
 
 void WifiEventHandler(void*,
                       esp_event_base_t event_base,
@@ -92,14 +95,14 @@ bool InitNvs() {
     if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         const esp_err_t erase_err = nvs_flash_erase();
         if (erase_err != ESP_OK) {
-            std::printf("logger: nvs erase failed: %s\n", esp_err_to_name(erase_err));
+            ESP_LOGE(kTag, "NVS erase failed: %s", esp_err_to_name(erase_err));
             return false;
         }
         err = nvs_flash_init();
     }
 
     if (err != ESP_OK) {
-        std::printf("logger: nvs init failed: %s\n", esp_err_to_name(err));
+        ESP_LOGE(kTag, "NVS init failed: %s", esp_err_to_name(err));
         return false;
     }
 
@@ -114,12 +117,12 @@ bool InitWifiCore() {
 
     if (!s_netif_initialized) {
         if (esp_netif_init() != ESP_OK) {
-            std::printf("logger: esp_netif_init failed\n");
+            ESP_LOGE(kTag, "esp_netif_init failed");
             return false;
         }
         const esp_err_t loop_err = esp_event_loop_create_default();
         if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
-            std::printf("logger: event loop init failed: %s\n", esp_err_to_name(loop_err));
+            ESP_LOGE(kTag, "Event loop init failed: %s", esp_err_to_name(loop_err));
             return false;
         }
         esp_netif_create_default_wifi_sta();
@@ -130,7 +133,7 @@ bool InitWifiCore() {
         const wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
         const esp_err_t err = esp_wifi_init(&cfg);
         if (err != ESP_OK) {
-            std::printf("logger: wifi init failed: %s\n", esp_err_to_name(err));
+            ESP_LOGE(kTag, "WiFi init failed: %s", esp_err_to_name(err));
             return false;
         }
         s_wifi_initialized = true;
@@ -138,11 +141,11 @@ bool InitWifiCore() {
 
     if (!s_events_registered) {
         if (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &WifiEventHandler, nullptr) != ESP_OK) {
-            std::printf("logger: wifi event handler register failed\n");
+            ESP_LOGE(kTag, "WiFi event handler register failed");
             return false;
         }
         if (esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &IpEventHandler, nullptr) != ESP_OK) {
-            std::printf("logger: ip event handler register failed\n");
+            ESP_LOGE(kTag, "IP event handler register failed");
             return false;
         }
         s_events_registered = true;
@@ -178,7 +181,7 @@ bool ConnectWifi() {
     }
 
     if (std::strlen(CONFIG_LOGGER_WIFI_SSID) == 0U) {
-        std::printf("logger: wifi ssid not set\n");
+        ESP_LOGE(kTag, "WiFi SSID not set");
         return false;
     }
 
@@ -193,17 +196,17 @@ bool ConnectWifi() {
     wifi_cfg.sta.password[sizeof(wifi_cfg.sta.password) - 1U] = '\0';
 
     if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) {
-        std::printf("logger: wifi set mode failed\n");
+        ESP_LOGE(kTag, "WiFi set mode failed");
         return false;
     }
     if (esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg) != ESP_OK) {
-        std::printf("logger: wifi set config failed\n");
+        ESP_LOGE(kTag, "WiFi set config failed");
         return false;
     }
 
     xEventGroupClearBits(s_wifi_event_group, kWifiConnectedBit | kWifiFailedBit);
     if (esp_wifi_start() != ESP_OK) {
-        std::printf("logger: wifi start failed\n");
+        ESP_LOGE(kTag, "WiFi start failed");
         return false;
     }
 
@@ -213,7 +216,7 @@ bool ConnectWifi() {
                                                  pdFALSE,
                                                  pdMS_TO_TICKS(kWifiConnectTimeoutMs));
     if ((bits & kWifiConnectedBit) == 0U) {
-        std::printf("logger: wifi connect timeout\n");
+        ESP_LOGE(kTag, "WiFi connect timeout");
         return false;
     }
 
@@ -227,7 +230,7 @@ bool SyncTime() {
     const bool synced = WaitForTimeSync();
     esp_sntp_stop();
     if (!synced) {
-        std::printf("logger: ntp sync timeout\n");
+        ESP_LOGW(kTag, "NTP sync timeout");
     }
     return synced;
 }
@@ -247,14 +250,14 @@ bool EnsureMqttClient() {
 
     s_client = esp_mqtt_client_init(&mqtt_cfg);
     if (s_client == nullptr) {
-        std::printf("logger: mqtt client init failed\n");
+        ESP_LOGE(kTag, "MQTT client init failed");
         return false;
     }
 
     s_connect_property.session_expiry_interval = 0U;
     s_connect_property.request_problem_info = true;
     if (esp_mqtt5_client_set_connect_property(s_client, &s_connect_property) != ESP_OK) {
-        std::printf("logger: mqtt5 connect property set failed\n");
+        ESP_LOGE(kTag, "MQTT5 connect property set failed");
         return false;
     }
 
@@ -262,7 +265,7 @@ bool EnsureMqttClient() {
                                        static_cast<esp_mqtt_event_id_t>(ESP_EVENT_ANY_ID),
                                        MqttEventHandler,
                                        nullptr) != ESP_OK) {
-        std::printf("logger: mqtt event handler register failed\n");
+        ESP_LOGE(kTag, "MQTT event handler register failed");
         return false;
     }
 
@@ -285,7 +288,7 @@ bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count) {
 
     xEventGroupClearBits(s_mqtt_event_group, kMqttConnectedBit);
     if (esp_mqtt_client_start(s_client) != ESP_OK) {
-        std::printf("logger: mqtt start failed\n");
+        ESP_LOGE(kTag, "MQTT start failed");
         return false;
     }
 
@@ -295,7 +298,7 @@ bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count) {
                                                  pdFALSE,
                                                  pdMS_TO_TICKS(kMqttConnectTimeoutMs));
     if ((bits & kMqttConnectedBit) == 0U) {
-        std::printf("logger: mqtt connect timeout\n");
+        ESP_LOGE(kTag, "MQTT connect timeout");
         esp_mqtt_client_stop(s_client);
         return false;
     }
@@ -310,7 +313,7 @@ bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count) {
         s_publish_property.payload_format_indicator = true;
         s_publish_property.content_type = "text/csv";
         if (esp_mqtt5_client_set_publish_property(s_client, &s_publish_property) != ESP_OK) {
-            std::printf("logger: mqtt5 publish property set failed\n");
+            ESP_LOGE(kTag, "MQTT5 publish property set failed");
             ok = false;
             continue;
         }
@@ -322,13 +325,69 @@ bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count) {
                                                    CONFIG_LOGGER_MQTT_QOS,
                                                    0);
         if (msg_id < 0) {
-            std::printf("logger: mqtt publish failed\n");
+            ESP_LOGE(kTag, "MQTT publish failed");
             ok = false;
         }
     }
 
     esp_mqtt_client_stop(s_client);
     return ok;
+}
+
+bool PublishRawInternal(const char* topic, const char* payload, const char* content_type) {
+    if (topic == nullptr || payload == nullptr) {
+        return false;
+    }
+
+    if (!ConnectWifi()) {
+        return false;
+    }
+    SyncTime();
+
+    if (!EnsureMqttClient()) {
+        return false;
+    }
+
+    xEventGroupClearBits(s_mqtt_event_group, kMqttConnectedBit);
+    if (esp_mqtt_client_start(s_client) != ESP_OK) {
+        ESP_LOGE(kTag, "MQTT start failed");
+        return false;
+    }
+
+    const EventBits_t bits = xEventGroupWaitBits(s_mqtt_event_group,
+                                                 kMqttConnectedBit,
+                                                 pdTRUE,
+                                                 pdFALSE,
+                                                 pdMS_TO_TICKS(kMqttConnectTimeoutMs));
+    if ((bits & kMqttConnectedBit) == 0U) {
+        ESP_LOGE(kTag, "MQTT connect timeout");
+        esp_mqtt_client_stop(s_client);
+        return false;
+    }
+
+    const char* resolved_type = (content_type != nullptr) ? content_type : "text/plain";
+    s_publish_property.payload_format_indicator = true;
+    s_publish_property.content_type = resolved_type;
+    if (esp_mqtt5_client_set_publish_property(s_client, &s_publish_property) != ESP_OK) {
+        ESP_LOGE(kTag, "MQTT5 publish property set failed");
+        esp_mqtt_client_stop(s_client);
+        return false;
+    }
+
+    const int msg_id = esp_mqtt_client_publish(s_client,
+                                               topic,
+                                               payload,
+                                               0,
+                                               CONFIG_LOGGER_MQTT_QOS,
+                                               0);
+    if (msg_id < 0) {
+        ESP_LOGE(kTag, "MQTT publish failed");
+        esp_mqtt_client_stop(s_client);
+        return false;
+    }
+
+    esp_mqtt_client_stop(s_client);
+    return true;
 }
 
 } // namespace
@@ -350,6 +409,13 @@ bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept {
 
 bool PublishFailure(const CsvLine& line) noexcept {
     const bool ok = PublishLines(CONFIG_LOGGER_MQTT_TOPIC_FAILURES, &line, 1U);
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+    return ok;
+}
+
+bool PublishRaw(const char* topic, const char* payload, const char* content_type) noexcept {
+    const bool ok = PublishRawInternal(topic, payload, content_type);
     esp_wifi_disconnect();
     esp_wifi_stop();
     return ok;
