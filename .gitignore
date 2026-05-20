@@ -3,3 +3,4 @@ build/
 .agents/
 .github/
 managed_components/
+.antigravitycli/

@@ -10,6 +10,7 @@
 #include "esp_sntp.h"
 #include "esp_wifi.h"
 #include "mqtt_client.h"
+#include "mqtt5_client.h"
 #include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
@@ -39,6 +40,9 @@ bool s_events_registered = false;
 bool s_nvs_initialized = false;
 
 esp_mqtt_client_handle_t s_client = nullptr;
+
+esp_mqtt5_connection_property_config_t s_connect_property{};
+esp_mqtt5_publish_property_config_t s_publish_property{};
 
 void WifiEventHandler(void*,
                       esp_event_base_t event_base,
@@ -238,10 +242,19 @@ bool EnsureMqttClient() {
     mqtt_cfg.credentials.username = CONFIG_LOGGER_MQTT_USERNAME;
     mqtt_cfg.credentials.authentication.password = CONFIG_LOGGER_MQTT_PASSWORD;
     mqtt_cfg.credentials.client_id = CONFIG_LOGGER_MQTT_CLIENT_ID;
+    mqtt_cfg.session.protocol_ver = MQTT_PROTOCOL_V_5;
+    mqtt_cfg.network.disable_auto_reconnect = true;
 
     s_client = esp_mqtt_client_init(&mqtt_cfg);
     if (s_client == nullptr) {
         std::printf("logger: mqtt client init failed\n");
+        return false;
+    }
+
+    s_connect_property.session_expiry_interval = 0U;
+    s_connect_property.request_problem_info = true;
+    if (esp_mqtt5_client_set_connect_property(s_client, &s_connect_property) != ESP_OK) {
+        std::printf("logger: mqtt5 connect property set failed\n");
         return false;
     }
 
@@ -292,6 +305,14 @@ bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count) {
         std::size_t payload_len = lines[i].length;
         if (payload_len > 0U && lines[i].buffer[payload_len - 1U] == '\n') {
             --payload_len;
+        }
+
+        s_publish_property.payload_format_indicator = true;
+        s_publish_property.content_type = "text/csv";
+        if (esp_mqtt5_client_set_publish_property(s_client, &s_publish_property) != ESP_OK) {
+            std::printf("logger: mqtt5 publish property set failed\n");
+            ok = false;
+            continue;
         }
 
         const int msg_id = esp_mqtt_client_publish(s_client,
