@@ -1,6 +1,7 @@
 #include "monitor.hpp"
 
 #include <cmath>
+#include <cstdio>
 
 #include "dsps_fft2r.h"
 #include "esp_timer.h"
@@ -156,6 +157,25 @@ bool Monitor::ComputeAndPublish() noexcept {
 
     if (!ComputeSwayAndDamping(result)) {
         return false;
+    }
+
+    if (config_.debug_enabled) {
+        std::printf("monitor_debug: roll_mean=%.3f roll_var=%.3f pitch_mean=%.3f pitch_var=%.3f "
+                    "roll_pp_max=%.3f roll_pp_mean=%.3f pitch_pp_max=%.3f pitch_pp_mean=%.3f "
+                    "roll_zeta=%.4f pitch_zeta=%.4f freq=%.3fHz samples=%u ts_us=%llu\n",
+                    result.roll_mean,
+                    result.roll_variance,
+                    result.pitch_mean,
+                    result.pitch_variance,
+                    result.roll_sway_pp_max,
+                    result.roll_sway_pp_mean,
+                    result.pitch_sway_pp_max,
+                    result.pitch_sway_pp_mean,
+                    result.roll_damping_ratio,
+                    result.pitch_damping_ratio,
+                    result.natural_freq_hz,
+                    static_cast<unsigned>(result.sample_count),
+                    static_cast<unsigned long long>(result.timestamp_us));
     }
 
     if (callback_ != nullptr) {

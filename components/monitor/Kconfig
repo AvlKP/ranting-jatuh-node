@@ -56,4 +56,10 @@ config MONITOR_FREEFALL_THS
     help
         LSM6DS3 free-fall threshold (register value).
 
+config MONITOR_DEBUG
+    bool "Enable monitor debug output"
+    default n
+    help
+        Print detailed monitor values to serial output.
+
 endmenu

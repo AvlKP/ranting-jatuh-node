@@ -16,6 +16,12 @@ constexpr std::size_t kStorageSamples =
 constexpr std::size_t kFftWindowSamples = 1024U;
 constexpr std::size_t kFftOverlapSamples = kFftWindowSamples / 2U;
 
+#ifdef CONFIG_MONITOR_DEBUG
+constexpr bool kMonitorDebugDefault = true;
+#else
+constexpr bool kMonitorDebugDefault = false;
+#endif
+
 struct MonitorConfig {
     float filter_alpha{0.98f};
     std::int32_t ae_gpio_pin{-1};
@@ -23,6 +29,7 @@ struct MonitorConfig {
     int ae_adc_threshold{CONFIG_MONITOR_AE_ADC_THRESHOLD};
     float peak_min_amplitude_deg{static_cast<float>(CONFIG_MONITOR_PEAK_MIN_AMPLITUDE)};
     std::size_t peak_min_spacing{static_cast<std::size_t>(CONFIG_MONITOR_PEAK_MIN_SPACING_SAMPLES)};
+    bool debug_enabled{kMonitorDebugDefault};
 };
 
 struct MonitorResult {
