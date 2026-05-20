@@ -59,7 +59,7 @@ bool BuildParameterPath(const TimeInfo& time_info, char* path, std::size_t path_
     if (time_info.valid) {
         const int len = std::snprintf(path,
                                       path_len,
-                                      "%s/params_%s.csv",
+                                      "%s/%s.csv",
                                       s_mount_point,
                                       time_info.date_yyyymmdd.data());
         return len > 0 && static_cast<std::size_t>(len) < path_len;
@@ -67,7 +67,7 @@ bool BuildParameterPath(const TimeInfo& time_info, char* path, std::size_t path_
 
     const int len = std::snprintf(path,
                                   path_len,
-                                  "%s/params_unsynced.csv",
+                                  "%s/unsync.csv",
                                   s_mount_point);
     return len > 0 && static_cast<std::size_t>(len) < path_len;
 }
@@ -79,7 +79,7 @@ bool BuildFailurePath(char* path, std::size_t path_len) {
 
     const int len = std::snprintf(path,
                                   path_len,
-                                  "%s/failure_events.csv",
+                                  "%s/failure.csv",
                                   s_mount_point);
     return len > 0 && static_cast<std::size_t>(len) < path_len;
 }

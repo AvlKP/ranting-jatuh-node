@@ -1,5 +1,6 @@
 #include "logger_internal.hpp"
 
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
@@ -39,6 +40,7 @@ bool s_netif_initialized = false;
 bool s_wifi_initialized = false;
 bool s_events_registered = false;
 bool s_nvs_initialized = false;
+std::uint8_t s_last_disconnect_reason = 0U;
 
 esp_mqtt_client_handle_t s_client = nullptr;
 
@@ -47,13 +49,58 @@ esp_mqtt5_publish_property_config_t s_publish_property{};
 
 static const char* kTag = "LOGGER_MQTT";
 
+const char* WifiReasonString(std::uint8_t reason) {
+    switch (reason) {
+        case WIFI_REASON_AUTH_FAIL:
+            return "auth_fail";
+        case WIFI_REASON_NO_AP_FOUND:
+            return "no_ap";
+        case WIFI_REASON_ASSOC_FAIL:
+            return "assoc_fail";
+        case WIFI_REASON_HANDSHAKE_TIMEOUT:
+            return "handshake_timeout";
+        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT:
+            return "4way_timeout";
+        case WIFI_REASON_BEACON_TIMEOUT:
+            return "beacon_timeout";
+        case WIFI_REASON_MIC_FAILURE:
+            return "mic_failure";
+        case WIFI_REASON_AUTH_EXPIRE:
+            return "auth_expire";
+        case WIFI_REASON_AUTH_LEAVE:
+            return "auth_leave";
+        case WIFI_REASON_ASSOC_EXPIRE:
+            return "assoc_expire";
+        case WIFI_REASON_ASSOC_LEAVE:
+            return "assoc_leave";
+        case WIFI_REASON_NOT_AUTHED:
+            return "not_authed";
+        case WIFI_REASON_NOT_ASSOCED:
+            return "not_assoc";
+        default:
+            return "unknown";
+    }
+}
+
 void WifiEventHandler(void*,
                       esp_event_base_t event_base,
                       int32_t event_id,
-                      void*) {
+                      void* event_data) {
     if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
         esp_wifi_connect();
     } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
+        if (event_data != nullptr) {
+            const auto* disconnected =
+                static_cast<wifi_event_sta_disconnected_t*>(event_data);
+            s_last_disconnect_reason = disconnected->reason;
+            ESP_LOGW(kTag,
+                     "WiFi disconnected: reason=%u (%s)",
+                     static_cast<std::uint32_t>(disconnected->reason),
+                     WifiReasonString(disconnected->reason));
+        } else {
+            s_last_disconnect_reason = 0U;
+            ESP_LOGW(kTag, "WiFi disconnected: reason=unknown");
+        }
         if (s_wifi_event_group != nullptr) {
             xEventGroupSetBits(s_wifi_event_group, kWifiFailedBit);
         }
@@ -74,8 +121,27 @@ void IpEventHandler(void*,
 void MqttEventHandler(void*,
                       esp_event_base_t,
                       int32_t event_id,
-                      void*) {
+                      void* event_data) {
     if (s_mqtt_event_group == nullptr) {
+        return;
+    }
+
+    if (event_id == MQTT_EVENT_ERROR) {
+        const auto* event = static_cast<esp_mqtt_event_handle_t>(event_data);
+        if (event != nullptr && event->error_handle != nullptr) {
+            const esp_mqtt_error_codes_t* err = event->error_handle;
+            ESP_LOGE(kTag,
+                     "MQTT error: type=%d esp_err=0x%x (%s) tls=%d tls_flags=0x%x sock_errno=%d (%s)",
+                     static_cast<int>(err->error_type),
+                     static_cast<unsigned>(err->esp_tls_last_esp_err),
+                     esp_err_to_name(err->esp_tls_last_esp_err),
+                     err->esp_tls_stack_err,
+                     err->esp_tls_cert_verify_flags,
+                     err->esp_transport_sock_errno,
+                     std::strerror(err->esp_transport_sock_errno));
+        } else {
+            ESP_LOGE(kTag, "MQTT error: missing event data");
+        }
         return;
     }
 
@@ -205,6 +271,7 @@ bool ConnectWifi() {
     }
 
     xEventGroupClearBits(s_wifi_event_group, kWifiConnectedBit | kWifiFailedBit);
+    s_last_disconnect_reason = 0U;
     if (esp_wifi_start() != ESP_OK) {
         ESP_LOGE(kTag, "WiFi start failed");
         return false;
@@ -215,6 +282,13 @@ bool ConnectWifi() {
                                                  pdTRUE,
                                                  pdFALSE,
                                                  pdMS_TO_TICKS(kWifiConnectTimeoutMs));
+    if ((bits & kWifiFailedBit) != 0U) {
+        ESP_LOGE(kTag,
+                 "WiFi connect failed: reason=%u (%s)",
+                 static_cast<std::uint32_t>(s_last_disconnect_reason),
+                 WifiReasonString(s_last_disconnect_reason));
+        return false;
+    }
     if ((bits & kWifiConnectedBit) == 0U) {
         ESP_LOGE(kTag, "WiFi connect timeout");
         return false;
