@@ -4,6 +4,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "esp_log_level.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "driver/i2c_master.h"
@@ -20,6 +21,8 @@
 #include "pins.hpp"
 #include "monitor.hpp"
 #include "logger.hpp"
+#include "dashboard.hpp"
+#include "verify.hpp"
 
 namespace {
 
@@ -28,10 +31,10 @@ constexpr std::uint32_t kI2cTimeoutMs = 100U;
 constexpr std::size_t kMaxI2cWrite = 8U;
 constexpr std::uint32_t kSdAllocUnit = 16U * 1024U;
 constexpr int kSdMaxFiles = 5;
-constexpr std::uint32_t kVerifyReadBuffer = 32U;
-
 static const char* kAppTag = "APP";
+#if CONFIG_APP_VERIFY_ENABLE
 static const char* kVerifyTag = "VERIFY";
+#endif
 
 i2c_master_bus_handle_t g_i2c_bus = nullptr;
 i2c_master_dev_handle_t g_imu_dev = nullptr;
@@ -165,108 +168,18 @@ bool InitSdCard() {
     return true;
 }
 
-void LogStackHighWatermark(const char* stage) {
-    const UBaseType_t words = uxTaskGetStackHighWaterMark(nullptr);
-    const std::uint32_t bytes = static_cast<std::uint32_t>(words) * sizeof(StackType_t);
-    ESP_LOGI(kVerifyTag, "%s stack high-water: %u bytes", stage, bytes);
-}
-
-bool VerifySdStorage() {
-    std::array<char, 96U> path{};
-    const int len = std::snprintf(path.data(),
-                                  path.size(),
-                                  "%s/verify.txt",
-                                  CONFIG_APP_SD_MOUNT_POINT);
-    if (len <= 0 || static_cast<std::size_t>(len) >= path.size()) {
-        ESP_LOGE(kVerifyTag, "Verify path build failed");
-        return false;
-    }
-
-    const char* payload = "verify_ok";
-    const std::size_t payload_len = std::strlen(payload);
-
-    FILE* file = std::fopen(path.data(), "w");
-    if (file == nullptr) {
-        ESP_LOGE(kVerifyTag, "Verify write open failed: %s errno=%d (%s)",
-                 path.data(),
-                 errno,
-                 std::strerror(errno));
-        return false;
-    }
-    const std::size_t written = std::fwrite(payload, 1U, payload_len, file);
-    std::fclose(file);
-    if (written != payload_len) {
-        ESP_LOGE(kVerifyTag, "Verify write failed: %s errno=%d (%s)",
-                 path.data(),
-                 errno,
-                 std::strerror(errno));
-        return false;
-    }
-
-    file = std::fopen(path.data(), "r");
-    if (file == nullptr) {
-        ESP_LOGE(kVerifyTag, "Verify read open failed: %s errno=%d (%s)",
-                 path.data(),
-                 errno,
-                 std::strerror(errno));
-        return false;
-    }
-
-    std::array<char, kVerifyReadBuffer> buffer{};
-    const std::size_t read = std::fread(buffer.data(), 1U, payload_len, file);
-    std::fclose(file);
-    if (read != payload_len || std::strncmp(buffer.data(), payload, payload_len) != 0) {
-        ESP_LOGE(kVerifyTag, "Verify read mismatch: %s", path.data());
-        return false;
-    }
-
-    ESP_LOGI(kVerifyTag, "Storage verify ok: %s", path.data());
-    return true;
-}
-
-bool VerifyMqtt(logger::Logger& logger) {
-    const char* topic = CONFIG_APP_VERIFY_MQTT_TOPIC;
-    if (topic == nullptr || std::strlen(topic) == 0U) {
-        ESP_LOGE(kVerifyTag, "MQTT verify topic not set");
-        return false;
-    }
-
-    const bool ok = logger.VerifyMqttPublish(topic, "verify_ok");
-    if (ok) {
-        ESP_LOGI(kVerifyTag, "MQTT verify publish ok: %s", topic);
-    } else {
-        ESP_LOGE(kVerifyTag, "MQTT verify publish failed: %s", topic);
-    }
-    return ok;
-}
-
-bool VerifyMonitorOutput(monitor::Monitor& monitor,
-                         logger::Logger& logger,
-                         float dt_s,
-                         TickType_t period_ticks) {
-    const std::uint64_t start_us = static_cast<std::uint64_t>(esp_timer_get_time());
-    const std::uint64_t timeout_us =
-        static_cast<std::uint64_t>(CONFIG_APP_VERIFY_MONITOR_TIMEOUT_MS) * 1000ULL;
-
-    while ((static_cast<std::uint64_t>(esp_timer_get_time()) - start_us) < timeout_us) {
-        if (!monitor.Update(dt_s)) {
-            ESP_LOGW(kVerifyTag, "Monitor update failed during verify");
-        }
-        logger.Poll();
-        if (logger.HasMonitorResult()) {
-            ESP_LOGI(kVerifyTag, "Monitor verify ok");
-            return true;
-        }
-        vTaskDelay(period_ticks);
-    }
-
-    ESP_LOGW(kVerifyTag, "Monitor verify timeout");
-    return false;
-}
+// (Helper definitions moved to verify.cpp)
 
 } // namespace
 
 extern "C" void app_main(void) {
+    esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
+    esp_log_level_set("httpd_parse", ESP_LOG_INFO);
+    esp_log_level_set("httpd_uri", ESP_LOG_INFO);
+    esp_log_level_set("httpd_sess", ESP_LOG_INFO);
+    esp_log_level_set("httpd", ESP_LOG_INFO);
+    esp_log_level_set("event", ESP_LOG_INFO);
+
     if (!InitImuI2c()) {
         ESP_LOGE(kAppTag, "I2C init failed");
         return;
@@ -307,6 +220,16 @@ extern "C" void app_main(void) {
     monitor.RegisterCallback(&logger::Logger::MonitorCallback, &logger);
     monitor.RegisterFailureCallback(&logger::Logger::FailureCallback, &logger);
 
+#if CONFIG_DASHBOARD_ENABLE
+    static dashboard::Dashboard dashboard{monitor, logger};
+    dashboard::Dashboard::Config dash_cfg{};
+    dash_cfg.port = CONFIG_DASHBOARD_PORT;
+    dash_cfg.enabled = true;
+    if (dashboard.Start(dash_cfg) != ESP_OK) {
+        ESP_LOGE(kAppTag, "Dashboard start failed");
+    }
+#endif
+
     const float dt_s = 1.0f / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
     const std::uint32_t rate_hz = static_cast<std::uint32_t>(CONFIG_MONITOR_IMU_RATE_HZ);
     const std::uint32_t period_ms = (1000U + rate_hz - 1U) / rate_hz;
@@ -314,7 +237,7 @@ extern "C" void app_main(void) {
 
 #if CONFIG_APP_VERIFY_ENABLE
     ESP_LOGI(kVerifyTag, "Verification start");
-    LogStackHighWatermark("startup");
+    verify::LogStackHighWatermark("startup");
 
     sensor::lsm6ds3::Value gyro{};
     sensor::lsm6ds3::Value accel{};
@@ -327,10 +250,10 @@ extern "C" void app_main(void) {
         ESP_LOGE(kVerifyTag, "IMU sample read failed");
     }
 
-    static_cast<void>(VerifySdStorage());
-    static_cast<void>(VerifyMqtt(logger));
-    static_cast<void>(VerifyMonitorOutput(monitor, logger, dt_s, period_ticks));
-    LogStackHighWatermark("post-verify");
+    static_cast<void>(verify::VerifySdStorage());
+    static_cast<void>(verify::VerifyMqtt(logger));
+    static_cast<void>(verify::VerifyMonitorOutput(monitor, logger, dt_s, period_ticks));
+    verify::LogStackHighWatermark("post-verify");
     ESP_LOGI(kVerifyTag, "Verification end");
 #endif
 

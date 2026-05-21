@@ -21,6 +21,28 @@ config LOGGER_WIFI_PASSWORD
     string "WiFi password"
     default ""
 
+config LOGGER_WIFI_ENT_ENABLE
+    bool "Enable WPA2-Enterprise (PEAP)"
+    default n
+    help
+        Use WPA2-Enterprise PEAP authentication instead of WPA2-Personal (PSK).
+
+config LOGGER_WIFI_ENT_IDENTITY
+    string "WPA2-Enterprise Identity"
+    default ""
+    depends on LOGGER_WIFI_ENT_ENABLE
+
+config LOGGER_WIFI_ENT_USERNAME
+    string "WPA2-Enterprise Username"
+    default ""
+    depends on LOGGER_WIFI_ENT_ENABLE
+
+config LOGGER_WIFI_ENT_PASSWORD
+    string "WPA2-Enterprise Password"
+    default ""
+    depends on LOGGER_WIFI_ENT_ENABLE
+
+
 config LOGGER_NTP_SERVER
     string "NTP server"
     default "pool.ntp.org"

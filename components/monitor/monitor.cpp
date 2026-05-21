@@ -4,11 +4,14 @@
 #include <cstdio>
 
 #include "dsps_fft2r.h"
+#include "dsps_view.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_err.h"
 #include "esp_attr.h"
+
+#define LOG_LOCAL_LEVEL ESP_LOG_INFO
 #include "esp_log.h"
 
 namespace monitor {
@@ -93,6 +96,18 @@ bool Monitor::Init() noexcept {
     }
 
     fft_initialized_ = true;
+
+#if CONFIG_MONITOR_TARE_ENABLE
+    taring_complete_ = false;
+#else
+    taring_complete_ = true;
+#endif
+    roll_offset_ = 0.0f;
+    pitch_offset_ = 0.0f;
+    roll_tare_sum_ = 0.0f;
+    pitch_tare_sum_ = 0.0f;
+    tare_samples_accumulated_ = 0U;
+
     return true;
 }
 
@@ -117,7 +132,60 @@ bool Monitor::Update(float dt_s) noexcept {
     const std::array<float, 3> gyro_vec{gyro.x, gyro.y, gyro.z};
     filter_.update(accel_vec, gyro_vec, dt_s);
 
-    PushSample(filter_.roll(), filter_.pitch());
+    float current_roll = filter_.roll();
+    float current_pitch = filter_.pitch();
+
+#if CONFIG_MONITOR_TARE_ENABLE
+    if (taring_complete_) {
+        current_roll -= roll_offset_;
+        current_pitch -= pitch_offset_;
+    } else {
+        roll_tare_sum_ += current_roll;
+        pitch_tare_sum_ += current_pitch;
+        ++tare_samples_accumulated_;
+        if (tare_samples_accumulated_ >= static_cast<std::size_t>(CONFIG_MONITOR_TARE_SAMPLES)) {
+            roll_offset_ = roll_tare_sum_ / static_cast<float>(CONFIG_MONITOR_TARE_SAMPLES);
+            pitch_offset_ = pitch_tare_sum_ / static_cast<float>(CONFIG_MONITOR_TARE_SAMPLES);
+            taring_complete_ = true;
+            ESP_LOGI(kTag, "Taring complete: roll_offset=%.3f pitch_offset=%.3f over %d samples",
+                     roll_offset_, pitch_offset_, CONFIG_MONITOR_TARE_SAMPLES);
+
+            for (std::size_t i = 0U; i < write_index_; ++i) {
+                roll_history_[i] -= roll_offset_;
+                pitch_history_[i] -= pitch_offset_;
+            }
+            for (std::size_t i = 0U; i < stream_count_; ++i) {
+                stream_samples_[i].roll -= roll_offset_;
+                stream_samples_[i].pitch -= pitch_offset_;
+            }
+
+            current_roll -= roll_offset_;
+            current_pitch -= pitch_offset_;
+        }
+    }
+#endif
+
+    PushSample(current_roll, current_pitch);
+
+    ESP_LOGD(kTag, "Raw stream: ax=%.3f ay=%.3f az=%.3f gx=%.3f gy=%.3f gz=%.3f r=%.3f p=%.3f",
+             accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z, current_roll, current_pitch);
+
+    StreamSample sample{};
+    sample.accel_x = accel.x;
+    sample.accel_y = accel.y;
+    sample.accel_z = accel.z;
+    sample.gyro_x = gyro.x;
+    sample.gyro_y = gyro.y;
+    sample.gyro_z = gyro.z;
+    sample.roll = current_roll;
+    sample.pitch = current_pitch;
+    sample.timestamp_us = static_cast<std::uint64_t>(esp_timer_get_time());
+
+    stream_samples_[stream_write_index_] = sample;
+    stream_write_index_ = (stream_write_index_ + 1U) % kMaxStreamSamples;
+    if (stream_count_ < kMaxStreamSamples) {
+        ++stream_count_;
+    }
 
     CheckFailureEvents();
 
@@ -166,25 +234,23 @@ bool Monitor::ComputeAndPublish() noexcept {
         return false;
     }
 
-    if (config_.debug_enabled) {
-        ESP_LOGI(kTag,
-                 "roll_mean=%.3f roll_var=%.3f pitch_mean=%.3f pitch_var=%.3f "
-                 "roll_pp_max=%.3f roll_pp_mean=%.3f pitch_pp_max=%.3f pitch_pp_mean=%.3f "
-                 "roll_zeta=%.4f pitch_zeta=%.4f freq=%.3fHz samples=%u ts_us=%llu",
-                 result.roll_mean,
-                 result.roll_variance,
-                 result.pitch_mean,
-                 result.pitch_variance,
-                 result.roll_sway_pp_max,
-                 result.roll_sway_pp_mean,
-                 result.pitch_sway_pp_max,
-                 result.pitch_sway_pp_mean,
-                 result.roll_damping_ratio,
-                 result.pitch_damping_ratio,
-                 result.natural_freq_hz,
-                 static_cast<unsigned>(result.sample_count),
-                 static_cast<unsigned long long>(result.timestamp_us));
-    }
+    ESP_LOGD(kTag,
+             "roll_mean=%.3f roll_var=%.3f pitch_mean=%.3f pitch_var=%.3f "
+             "roll_pp_max=%.3f roll_pp_mean=%.3f pitch_pp_max=%.3f pitch_pp_mean=%.3f "
+             "roll_zeta=%.4f pitch_zeta=%.4f freq=%.3fHz samples=%u ts_us=%llu",
+             result.roll_mean,
+             result.roll_variance,
+             result.pitch_mean,
+             result.pitch_variance,
+             result.roll_sway_pp_max,
+             result.roll_sway_pp_mean,
+             result.pitch_sway_pp_max,
+             result.pitch_sway_pp_mean,
+             result.roll_damping_ratio,
+             result.pitch_damping_ratio,
+             result.natural_freq_hz,
+             static_cast<unsigned>(result.sample_count),
+             static_cast<unsigned long long>(result.timestamp_us));
 
     if (callback_ != nullptr) {
         callback_(callback_ctx_, result);
@@ -246,11 +312,30 @@ bool Monitor::ComputeNaturalFrequency(MonitorResult& result) noexcept {
     for (std::size_t seg = 0U; seg < segments; ++seg) {
         const std::size_t seg_start = base_start + (seg * step);
 
+        float mean = 0.0f;
+#if CONFIG_MONITOR_FFT_DE_MEAN_ENABLE
+        float sum = 0.0f;
         for (std::size_t i = 0U; i < kFftWindowSamples; ++i) {
             const std::size_t idx = PhysicalIndex(seg_start + i);
             const float roll = roll_history_[idx];
             const float pitch = pitch_history_[idx];
             const float magnitude = std::sqrt((roll * roll) + (pitch * pitch));
+            fft_input_[2U * i] = magnitude;
+            sum += magnitude;
+        }
+        mean = sum / static_cast<float>(kFftWindowSamples);
+#endif
+
+        for (std::size_t i = 0U; i < kFftWindowSamples; ++i) {
+            float magnitude = 0.0f;
+#if CONFIG_MONITOR_FFT_DE_MEAN_ENABLE
+            magnitude = fft_input_[2U * i] - mean;
+#else
+            const std::size_t idx = PhysicalIndex(seg_start + i);
+            const float roll = roll_history_[idx];
+            const float pitch = pitch_history_[idx];
+            magnitude = std::sqrt((roll * roll) + (pitch * pitch));
+#endif
 
             const float window = 0.5f - 0.5f *
                 std::cos(kTwoPi * static_cast<float>(i) / static_cast<float>(kFftWindowSamples - 1U));
@@ -287,6 +372,11 @@ bool Monitor::ComputeNaturalFrequency(MonitorResult& result) noexcept {
     const float sample_rate_hz = static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
     result.natural_freq_hz = (static_cast<float>(max_bin) * sample_rate_hz) /
                              static_cast<float>(kFftWindowSamples);
+
+    if (LOG_LOCAL_LEVEL >= ESP_LOG_DEBUG) {
+        printf("MONITOR: FFT PSD Welch Output Plot:\n");
+        dsps_view(psd_accum_.data(), kFftWindowSamples / 2U, 64, 10, 0.0f, max_val * segments, '|');
+    }
 
     return true;
 }
@@ -497,6 +587,40 @@ void IRAM_ATTR Monitor::AeGpioIsr(void* arg) noexcept {
     auto* self = static_cast<Monitor*>(arg);
     if (self != nullptr) {
         self->ae_gpio_event_ = true;
+    }
+}
+
+void Monitor::GetFftData(float* out_psd, std::size_t& out_len) const noexcept {
+    out_len = kFftWindowSamples / 2U;
+    if (out_psd != nullptr) {
+        for (std::size_t i = 0U; i < out_len; ++i) {
+            out_psd[i] = psd_accum_[i];
+        }
+    }
+}
+
+void Monitor::GetTiltHistory(float* out_roll, float* out_pitch, std::size_t& out_len, std::size_t max_len) const noexcept {
+    const std::size_t count = BufferSize();
+    out_len = (count < max_len) ? count : max_len;
+    
+    if (out_roll != nullptr && out_pitch != nullptr) {
+        std::size_t start_idx = count - out_len;
+        for (std::size_t i = 0U; i < out_len; ++i) {
+            std::size_t idx = PhysicalIndex(start_idx + i);
+            out_roll[i] = roll_history_[idx];
+            out_pitch[i] = pitch_history_[idx];
+        }
+    }
+}
+
+void Monitor::GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) const noexcept {
+    out_len = (stream_count_ < max_len) ? stream_count_ : max_len;
+    if (out_samples != nullptr) {
+        std::size_t start_idx = (stream_count_ < kMaxStreamSamples) ? 0U : stream_write_index_;
+        for (std::size_t i = 0U; i < out_len; ++i) {
+            std::size_t idx = (start_idx + i) % kMaxStreamSamples;
+            out_samples[i] = stream_samples_[idx];
+        }
     }
 }
 

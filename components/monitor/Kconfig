@@ -56,10 +56,25 @@ config MONITOR_FREEFALL_THS
     help
         LSM6DS3 free-fall threshold (register value).
 
-config MONITOR_DEBUG
-    bool "Enable monitor debug output"
-    default n
+config MONITOR_TARE_ENABLE
+    bool "Enable tilt taring at startup"
+    default y
     help
-        Print detailed monitor values to serial output.
+        Calculates and subtracts baseline tilt (roll/pitch) offset at startup.
+
+config MONITOR_TARE_SAMPLES
+    int "Tilt tare sample count"
+    default 100
+    range 10 1000
+    help
+        Number of initial samples to average for the baseline tare offset calculation.
+
+config MONITOR_FFT_DE_MEAN_ENABLE
+    bool "Enable de-meaning/zero-centering of FFT input"
+    default y
+    help
+        Removes the mean (DC component) from input tilt vector before performing FFT to avoid a 0Hz peak.
 
 endmenu
+
+

@@ -17,7 +17,7 @@ namespace {
 constexpr std::size_t kPendingParamsMax = 32U;
 constexpr std::uint32_t kMinValidEpoch = 1672531200U;
 constexpr std::uint64_t kPublishPeriodUs =
-    static_cast<std::uint64_t>(CONFIG_LOGGER_WIFI_PERIOD_HOURS) * 3600ULL * 1000000ULL;
+    static_cast<std::uint64_t>(CONFIG_LOGGER_WIFI_PERIOD_HOURS) * 60ULL * 1000000ULL;
 
 static const char* kTag = "LOGGER";
 

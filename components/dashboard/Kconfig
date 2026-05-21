@@ -1,0 +1,16 @@
+menu "Dashboard"
+
+config DASHBOARD_ENABLE
+    bool "Enable Debugging Dashboard"
+    default y
+    help
+        Start HTTP server on port 80 to serve the debugging dashboard webpage.
+
+config DASHBOARD_PORT
+    int "Dashboard server port"
+    default 80
+    range 1 65535
+    help
+        Port to run the HTTP server on.
+
+endmenu

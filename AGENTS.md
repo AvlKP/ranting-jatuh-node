@@ -5,6 +5,8 @@ ALWAYS use the following skills when writing code:
 - '/writing-realtime-cpp'
 - '/esp-idf-esp32s3-development'
 
+The host OS is Windows. Use PowerShell, NOT Bash.
+
 ## 1. Project Overview
 - **Description:** 
   - A tree branch monitoring system that notifies users when events that signal risk or branch failure occured. 

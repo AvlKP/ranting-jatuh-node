@@ -2,4 +2,4 @@
 1. Transition to RTOS and `esp_event.h` API
 2. Add wind/storm state to trigger sway and damping ratio calculation
 3. Use IMU's FIFO to reduce awake time
-4. Do temperature calibration on IMUw
+4. Do temperature calibration on IMU

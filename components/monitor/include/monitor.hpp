@@ -16,11 +16,17 @@ constexpr std::size_t kStorageSamples =
 constexpr std::size_t kFftWindowSamples = 1024U;
 constexpr std::size_t kFftOverlapSamples = kFftWindowSamples / 2U;
 
-#ifdef CONFIG_MONITOR_DEBUG
-constexpr bool kMonitorDebugDefault = true;
-#else
-constexpr bool kMonitorDebugDefault = false;
-#endif
+struct StreamSample {
+    float accel_x{0.0f};
+    float accel_y{0.0f};
+    float accel_z{0.0f};
+    float gyro_x{0.0f};
+    float gyro_y{0.0f};
+    float gyro_z{0.0f};
+    float roll{0.0f};
+    float pitch{0.0f};
+    std::uint64_t timestamp_us{0};
+};
 
 struct MonitorConfig {
     float filter_alpha{0.98f};
@@ -29,7 +35,6 @@ struct MonitorConfig {
     int ae_adc_threshold{CONFIG_MONITOR_AE_ADC_THRESHOLD};
     float peak_min_amplitude_deg{static_cast<float>(CONFIG_MONITOR_PEAK_MIN_AMPLITUDE)};
     std::size_t peak_min_spacing{static_cast<std::size_t>(CONFIG_MONITOR_PEAK_MIN_SPACING_SAMPLES)};
-    bool debug_enabled{kMonitorDebugDefault};
 };
 
 struct MonitorResult {
@@ -74,6 +79,10 @@ public:
     [[nodiscard]] bool ReadImuSample(sensor::lsm6ds3::Value& gyro,
                                      sensor::lsm6ds3::Value& accel) noexcept;
 
+    void GetFftData(float* out_psd, std::size_t& out_len) const noexcept;
+    void GetTiltHistory(float* out_roll, float* out_pitch, std::size_t& out_len, std::size_t max_len) const noexcept;
+    void GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) const noexcept;
+
 private:
     [[nodiscard]] bool ReadImu(sensor::lsm6ds3::Value& gyro,
                                sensor::lsm6ds3::Value& accel) noexcept;
@@ -102,6 +111,13 @@ private:
     std::size_t write_index_{0U};
     std::size_t sample_count_{0U};
 
+    bool taring_complete_{false};
+    float roll_offset_{0.0f};
+    float pitch_offset_{0.0f};
+    float roll_tare_sum_{0.0f};
+    float pitch_tare_sum_{0.0f};
+    std::size_t tare_samples_accumulated_{0U};
+
     std::array<float, kFftWindowSamples * 2U> fft_input_{};
     std::array<float, kFftWindowSamples / 2U> psd_accum_{};
     bool fft_initialized_{false};
@@ -109,6 +125,11 @@ private:
     void* adc_handle_{nullptr};
     bool adc_initialized_{false};
     volatile bool ae_gpio_event_{false};
+
+    static constexpr std::size_t kMaxStreamSamples = 20U;
+    std::array<StreamSample, kMaxStreamSamples> stream_samples_{};
+    std::size_t stream_write_index_{0U};
+    std::size_t stream_count_{0U};
 };
 
 } // namespace monitor

@@ -4,3 +4,4 @@ build/
 .github/
 managed_components/
 .antigravitycli/
+sdkconfig*
