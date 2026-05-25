@@ -1,5 +1,6 @@
 #include "dashboard.hpp"
 #include "mqtt_log.hpp"
+#include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -7,9 +8,6 @@
 #include <sys/stat.h>
 #include <cstdio>
 #include <cstring>
-
-#define LOG_LOCAL_LEVEL ESP_LOG_INFO
-#include "esp_log.h"
 
 namespace dashboard {
 

@@ -1,11 +1,8 @@
 # AGENTS.md - Project Context & Guidelines
 
 ## 0. IMPORTANT
-ALWAYS use the following skills when writing code:
-- '/writing-realtime-cpp'
-- '/esp-idf-esp32s3-development'
-
 The host OS is Windows. Use PowerShell, NOT Bash.
+Source 'C:\Espressif\tools\Microsoft.v5.5.4.PowerShell_profile.ps1' to enable ESP-IDF environment.
 
 ## 1. Project Overview
 - **Description:** 
@@ -13,7 +10,8 @@ The host OS is Windows. Use PowerShell, NOT Bash.
   - System analyze dynamic behavior of branch to determine risks and send warnings. 
   - System is made up of IoT nodes for monitoring and a server for analysis.
 - **Goal:**
-  - Send warnings via notification when events that signify increased risk of failure happens.
+  - Nodes send periodic data of parameters that indicate failure to server.
+  - Server calculates the probability of failure and detect anomalies; send warning if risk detected.
   - Send notification when branch failure occurrs.
 - **Target Hardware:**  ESP32-S3FH4R2 on a custom PCB, pinout defined in 'main/pins.hpp'.
 - **Success Criteria:** Give a notification to app upon failure or warnings based on prediction, optimized power usage (without complex deep-sleep states to favor rapid iteration), send regular monitoring data to server via MQTT.
@@ -40,7 +38,7 @@ The host OS is Windows. Use PowerShell, NOT Bash.
 ## 5. Agent Instructions
 - **Code Style:** Follow C++ for real time systems coding style.
 - **Don'ts:** Combine everything into one source file.
-- **Dos:** Always use '/writing-realtime-cpp' and '/esp-idf-esp32s3-development' skills when writing code, optimize battery usage, ask questions about the hardware required.
+- **Dos:** Always use '/realtime-cpp' and '/esp32s3-idf' skills when writing code, optimize battery usage, ask questions about the hardware required.
 
 Respond terse like smart caveman. All technical substance stay. Only fluff die.
 

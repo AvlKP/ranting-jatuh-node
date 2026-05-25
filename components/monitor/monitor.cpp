@@ -3,9 +3,12 @@
 #include <cmath>
 #include <cstdio>
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
 #include "dsps_fft2r.h"
 #include "dsps_view.h"
 #include "esp_timer.h"
+#include "esp_event.h"
 #include "driver/gpio.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_err.h"
@@ -16,11 +19,21 @@
 
 namespace monitor {
 
+ESP_EVENT_DEFINE_BASE(MONITOR_EVENT_BASE);
+
 namespace {
 
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kTwoPi = 6.2831853071795864769f;
 static const char* kTag = "MONITOR";
+constexpr std::size_t kTaskStackSize = 8192U;
+constexpr UBaseType_t kTaskPriority = 5U;
+constexpr BaseType_t kTaskCore = 1;
+
+void MonitorTaskEntry(void* arg) noexcept {
+    auto* self = static_cast<Monitor*>(arg);
+    self->TaskLoop();
+}
 
 } // namespace
 
@@ -111,14 +124,36 @@ bool Monitor::Init() noexcept {
     return true;
 }
 
-void Monitor::RegisterCallback(EventCb cb, void* ctx) noexcept {
-    callback_ = cb;
-    callback_ctx_ = ctx;
+bool Monitor::Start() noexcept {
+    const BaseType_t ret = xTaskCreatePinnedToCore(
+        MonitorTaskEntry,
+        "monitor_task",
+        kTaskStackSize,
+        this,
+        kTaskPriority,
+        static_cast<TaskHandle_t*>(nullptr),
+        kTaskCore);
+    if (ret != pdPASS) {
+        ESP_LOGE(kTag, "Failed to create monitor_task");
+        return false;
+    }
+    ESP_LOGI(kTag, "monitor_task started on core %d, priority %u", kTaskCore, kTaskPriority);
+    return true;
 }
 
-void Monitor::RegisterFailureCallback(FailureCb cb, void* ctx) noexcept {
-    failure_callback_ = cb;
-    failure_callback_ctx_ = ctx;
+void Monitor::TaskLoop() noexcept {
+    const float dt_s = 1.0f / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    const std::uint32_t rate_hz = static_cast<std::uint32_t>(CONFIG_MONITOR_IMU_RATE_HZ);
+    const std::uint32_t period_ms = (1000U + rate_hz - 1U) / rate_hz;
+    const TickType_t period_ticks = pdMS_TO_TICKS(period_ms);
+    TickType_t last_wake = xTaskGetTickCount();
+
+    while (true) {
+        if (!Update(dt_s)) {
+            ESP_LOGW(kTag, "Monitor update failed");
+        }
+        vTaskDelayUntil(&last_wake, period_ticks);
+    }
 }
 
 bool Monitor::Update(float dt_s) noexcept {
@@ -181,10 +216,13 @@ bool Monitor::Update(float dt_s) noexcept {
     sample.pitch = current_pitch;
     sample.timestamp_us = static_cast<std::uint64_t>(esp_timer_get_time());
 
-    stream_samples_[stream_write_index_] = sample;
-    stream_write_index_ = (stream_write_index_ + 1U) % kMaxStreamSamples;
-    if (stream_count_ < kMaxStreamSamples) {
-        ++stream_count_;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stream_samples_[stream_write_index_] = sample;
+        stream_write_index_ = (stream_write_index_ + 1U) % kMaxStreamSamples;
+        if (stream_count_ < kMaxStreamSamples) {
+            ++stream_count_;
+        }
     }
 
     CheckFailureEvents();
@@ -207,6 +245,7 @@ bool Monitor::ReadImu(sensor::lsm6ds3::Value& gyro,
 }
 
 void Monitor::PushSample(float roll, float pitch) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     roll_history_[write_index_] = roll;
     pitch_history_[write_index_] = pitch;
 
@@ -252,9 +291,11 @@ bool Monitor::ComputeAndPublish() noexcept {
              static_cast<unsigned>(result.sample_count),
              static_cast<unsigned long long>(result.timestamp_us));
 
-    if (callback_ != nullptr) {
-        callback_(callback_ctx_, result);
-    }
+    esp_event_post(MONITOR_EVENT_BASE,
+                   MONITOR_EVENT_RESULT,
+                   &result,
+                   sizeof(result),
+                   0);
 
     return true;
 }
@@ -561,14 +602,14 @@ void Monitor::CheckFailureEvents() noexcept {
 }
 
 void Monitor::PublishFailure(FailureEvent event) noexcept {
-    if (failure_callback_ == nullptr) {
-        return;
-    }
-
     FailureResult result{};
     result.event = event;
     result.timestamp_us = static_cast<std::uint64_t>(esp_timer_get_time());
-    failure_callback_(failure_callback_ctx_, result);
+    esp_event_post(MONITOR_EVENT_BASE,
+                   MONITOR_EVENT_FAILURE,
+                   &result,
+                   sizeof(result),
+                   0);
 }
 
 std::size_t Monitor::BufferSize() const noexcept {
@@ -591,6 +632,7 @@ void IRAM_ATTR Monitor::AeGpioIsr(void* arg) noexcept {
 }
 
 void Monitor::GetFftData(float* out_psd, std::size_t& out_len) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     out_len = kFftWindowSamples / 2U;
     if (out_psd != nullptr) {
         for (std::size_t i = 0U; i < out_len; ++i) {
@@ -600,6 +642,7 @@ void Monitor::GetFftData(float* out_psd, std::size_t& out_len) const noexcept {
 }
 
 void Monitor::GetTiltHistory(float* out_roll, float* out_pitch, std::size_t& out_len, std::size_t max_len) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     const std::size_t count = BufferSize();
     out_len = (count < max_len) ? count : max_len;
     
@@ -614,6 +657,7 @@ void Monitor::GetTiltHistory(float* out_roll, float* out_pitch, std::size_t& out
 }
 
 void Monitor::GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) const noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
     out_len = (stream_count_ < max_len) ? stream_count_ : max_len;
     if (out_samples != nullptr) {
         std::size_t start_idx = (stream_count_ < kMaxStreamSamples) ? 0U : stream_write_index_;

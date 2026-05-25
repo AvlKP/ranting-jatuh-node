@@ -93,24 +93,17 @@ bool VerifyMqtt(logger::Logger& logger) {
     return ok;
 }
 
-bool VerifyMonitorOutput(monitor::Monitor& monitor,
-                         logger::Logger& logger,
-                         float dt_s,
-                         TickType_t period_ticks) {
+bool VerifyMonitorOutput(logger::Logger& logger) {
     const std::uint64_t start_us = static_cast<std::uint64_t>(esp_timer_get_time());
     const std::uint64_t timeout_us =
         static_cast<std::uint64_t>(CONFIG_APP_VERIFY_MONITOR_TIMEOUT_MS) * 1000ULL;
 
     while ((static_cast<std::uint64_t>(esp_timer_get_time()) - start_us) < timeout_us) {
-        if (!monitor.Update(dt_s)) {
-            ESP_LOGW(kVerifyTag, "Monitor update failed during verify");
-        }
-        logger.Poll();
         if (logger.HasMonitorResult()) {
             ESP_LOGI(kVerifyTag, "Monitor verify ok");
             return true;
         }
-        vTaskDelay(period_ticks);
+        vTaskDelay(pdMS_TO_TICKS(100));
     }
 
     ESP_LOGW(kVerifyTag, "Monitor verify timeout");

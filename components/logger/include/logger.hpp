@@ -3,7 +3,14 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+
+#include "freertos/FreeRTOS.h"
+#include "freertos/queue.h"
+#include "freertos/task.h"
+#include "esp_event.h"
+
 #include "monitor.hpp"
+#include "monitor_events.hpp"
 
 namespace logger {
 
@@ -14,15 +21,15 @@ public:
     };
 
     [[nodiscard]] bool Init(const Config& config) noexcept;
-    void HandleMonitorEvent(const monitor::MonitorResult& result) noexcept;
-    void HandleFailureEvent(const monitor::FailureResult& result) noexcept;
-    static void MonitorCallback(void* ctx, const monitor::MonitorResult& result) noexcept;
-    static void FailureCallback(void* ctx, const monitor::FailureResult& result) noexcept;
-    // Superloop note: SD/MQTT IO can block and add jitter; call Poll often.
-    // RTOS task+queue isolates IO, keeps monitor loop deterministic, and avoids long stalls.
-    void Poll() noexcept;
+    [[nodiscard]] bool Start() noexcept;
     [[nodiscard]] bool VerifyMqttPublish(const char* topic, const char* payload) noexcept;
     [[nodiscard]] bool HasMonitorResult() const noexcept;
+
+    static void EventHandler(void* handler_args,
+                              esp_event_base_t base,
+                              std::int32_t id,
+                              void* event_data) noexcept;
+    void TaskLoop() noexcept;
 
 private:
     enum class EventType : std::uint8_t {
@@ -36,13 +43,9 @@ private:
         monitor::FailureResult failure{};
     };
 
-    [[nodiscard]] bool Enqueue(const Event& event) noexcept;
-    [[nodiscard]] bool Dequeue(Event& event) noexcept;
-
     static constexpr std::size_t kQueueDepth = 16U;
-    std::array<Event, kQueueDepth> queue_{};
-    std::size_t queue_head_{0U};
-    std::size_t queue_count_{0U};
+    QueueHandle_t queue_handle_{nullptr};
+    TaskHandle_t task_handle_{nullptr};
 
     std::uint32_t dropped_events_{0U};
     std::uint32_t dropped_parameters_{0U};

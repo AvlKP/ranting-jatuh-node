@@ -20,6 +20,14 @@ constexpr std::uint64_t kPublishPeriodUs =
     static_cast<std::uint64_t>(CONFIG_LOGGER_WIFI_PERIOD_HOURS) * 60ULL * 1000000ULL;
 
 static const char* kTag = "LOGGER";
+constexpr std::size_t kTaskStackSize = 6144U;
+constexpr UBaseType_t kTaskPriority = 4U;
+constexpr BaseType_t kTaskCore = 0;
+
+void LoggerTaskEntry(void* arg) noexcept {
+    auto* self = static_cast<Logger*>(arg);
+    self->TaskLoop();
+}
 
 struct PendingParamsBuffer {
     std::array<CsvLine, kPendingParamsMax> lines{};
@@ -154,148 +162,151 @@ bool Logger::Init(const Config& config) noexcept {
         ESP_LOGE(kTag, "MQTT init failed");
     }
 
+    queue_handle_ = xQueueCreate(kQueueDepth, sizeof(Event));
+    if (queue_handle_ == nullptr) {
+        ESP_LOGE(kTag, "Failed to create logger queue");
+        return false;
+    }
+
+    esp_err_t err = esp_event_handler_register(
+        monitor::MONITOR_EVENT_BASE,
+        monitor::MONITOR_EVENT_RESULT,
+        &Logger::EventHandler,
+        this);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to register MONITOR_EVENT_RESULT handler: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    err = esp_event_handler_register(
+        monitor::MONITOR_EVENT_BASE,
+        monitor::MONITOR_EVENT_FAILURE,
+        &Logger::EventHandler,
+        this);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to register MONITOR_EVENT_FAILURE handler: %s", esp_err_to_name(err));
+        return false;
+    }
+
     const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
     next_publish_us_ = now_us + kPublishPeriodUs;
     return true;
 }
 
-bool Logger::Enqueue(const Event& event) noexcept {
-    if (kQueueDepth == 0U) {
-        return false;
-    }
-
-    if (queue_count_ == kQueueDepth) {
-        const Event& dropped = queue_[queue_head_];
-        ++dropped_events_;
-        if (dropped.type == EventType::Failure) {
-            ++dropped_failures_;
-        } else {
-            ++dropped_parameters_;
-        }
-        ESP_LOGW(kTag, "Event buffer full, drop oldest");
-        queue_head_ = (queue_head_ + 1U) % kQueueDepth;
-        --queue_count_;
-    }
-
-    const std::size_t tail = (queue_head_ + queue_count_) % kQueueDepth;
-    queue_[tail] = event;
-    ++queue_count_;
-    return true;
-}
-
-bool Logger::Dequeue(Event& event) noexcept {
-    if (queue_count_ == 0U) {
-        return false;
-    }
-
-    event = queue_[queue_head_];
-    queue_head_ = (queue_head_ + 1U) % kQueueDepth;
-    --queue_count_;
-    return true;
-}
-
-void Logger::HandleMonitorEvent(const monitor::MonitorResult& result) noexcept {
-    Event event{};
-    event.type = EventType::Parameters;
-    event.monitor = result;
-    has_monitor_result_ = true;
-    if (!Enqueue(event)) {
-        ++dropped_events_;
-        ++dropped_parameters_;
-        ESP_LOGW(kTag, "Parameter event dropped");
-    }
-}
-
-void Logger::HandleFailureEvent(const monitor::FailureResult& result) noexcept {
-    Event event{};
-    event.type = EventType::Failure;
-    event.failure = result;
-    if (!Enqueue(event)) {
-        ++dropped_events_;
-        ++dropped_failures_;
-        ESP_LOGW(kTag, "Failure event dropped");
-    }
-}
-
-void Logger::MonitorCallback(void* ctx, const monitor::MonitorResult& result) noexcept {
-    if (ctx == nullptr) {
+void Logger::EventHandler(void* handler_args,
+                           esp_event_base_t base,
+                           std::int32_t id,
+                           void* event_data) noexcept {
+    auto* self = static_cast<Logger*>(handler_args);
+    if (self == nullptr || self->queue_handle_ == nullptr) {
         return;
     }
 
-    static_cast<Logger*>(ctx)->HandleMonitorEvent(result);
-}
-
-void Logger::FailureCallback(void* ctx, const monitor::FailureResult& result) noexcept {
-    if (ctx == nullptr) {
+    Event event{};
+    if (id == monitor::MONITOR_EVENT_RESULT) {
+        event.type = EventType::Parameters;
+        event.monitor = *static_cast<const monitor::MonitorResult*>(event_data);
+        self->has_monitor_result_ = true;
+    } else if (id == monitor::MONITOR_EVENT_FAILURE) {
+        event.type = EventType::Failure;
+        event.failure = *static_cast<const monitor::FailureResult*>(event_data);
+    } else {
         return;
     }
 
-    static_cast<Logger*>(ctx)->HandleFailureEvent(result);
+    if (xQueueSend(self->queue_handle_, &event, 0) != pdTRUE) {
+        ++self->dropped_events_;
+        if (event.type == EventType::Failure) {
+            ++self->dropped_failures_;
+        } else {
+            ++self->dropped_parameters_;
+        }
+        ESP_LOGW(kTag, "Event queue full, dropped");
+    }
 }
 
-void Logger::Poll() noexcept {
-    Event event{};
-    if (Dequeue(event)) {
-        if (event.type == EventType::Parameters) {
-            TimeInfo time_info{};
-            time_info.timestamp_us = event.monitor.timestamp_us;
-            static_cast<void>(BuildTimeInfo(time_info));
-
-            CsvLine line{};
-            if (!FormatParameterCsv(event.monitor, time_info, line)) {
-                ESP_LOGE(kTag, "Format parameter CSV failed");
-            } else {
-                if (!storage::AppendParameter(time_info, line)) {
-                    ESP_LOGE(kTag, "Parameter storage write failed");
-                }
-#if CONFIG_LOGGER_SERIAL_OUTPUT
-                ESP_LOGI(kTag, "param_csv=%.*s",
-                         static_cast<int>(line.length),
-                         line.buffer.data());
-#endif
-                AppendPendingParameter(line);
-            }
-        } else {
-            TimeInfo time_info{};
-            time_info.timestamp_us = event.failure.timestamp_us;
-            static_cast<void>(BuildTimeInfo(time_info));
-
-            CsvLine line{};
-            if (!FormatFailureCsv(event.failure, time_info, line)) {
-                ESP_LOGE(kTag, "Format failure CSV failed");
-            } else {
-                if (!mqtt::PublishFailure(line)) {
-                    ESP_LOGE(kTag, "Failure MQTT publish failed");
-                }
-                if (!storage::AppendFailure(time_info, line)) {
-                    ESP_LOGE(kTag, "Failure storage write failed");
-                }
-#if CONFIG_LOGGER_SERIAL_OUTPUT
-                ESP_LOGI(kTag, "failure_csv=%.*s",
-                         static_cast<int>(line.length),
-                         line.buffer.data());
-#endif
-            }
-        }
+bool Logger::Start() noexcept {
+    const BaseType_t ret = xTaskCreatePinnedToCore(
+        LoggerTaskEntry,
+        "logger_task",
+        kTaskStackSize,
+        this,
+        kTaskPriority,
+        &task_handle_,
+        kTaskCore);
+    if (ret != pdPASS) {
+        ESP_LOGE(kTag, "Failed to create logger_task");
+        return false;
     }
+    ESP_LOGI(kTag, "logger_task started on core %d, priority %u", kTaskCore, kTaskPriority);
+    return true;
+}
 
-    const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
-    if (now_us >= next_publish_us_) {
-        if (g_pending_params.count > 0U) {
-            for (std::size_t i = 0U; i < g_pending_params.count; ++i) {
-                const std::size_t idx = (g_pending_params.head + i) % kPendingParamsMax;
-                g_publish_batch[i] = g_pending_params.lines[idx];
-            }
+void Logger::TaskLoop() noexcept {
+    while (true) {
+        Event event{};
+        if (xQueueReceive(queue_handle_, &event, pdMS_TO_TICKS(100)) == pdTRUE) {
+            if (event.type == EventType::Parameters) {
+                TimeInfo time_info{};
+                time_info.timestamp_us = event.monitor.timestamp_us;
+                static_cast<void>(BuildTimeInfo(time_info));
 
-            if (mqtt::PublishParameters(g_publish_batch.data(), g_pending_params.count)) {
-                g_pending_params.head = 0U;
-                g_pending_params.count = 0U;
+                CsvLine line{};
+                if (!FormatParameterCsv(event.monitor, time_info, line)) {
+                    ESP_LOGE(kTag, "Format parameter CSV failed");
+                } else {
+                    if (!storage::AppendParameter(time_info, line)) {
+                        ESP_LOGE(kTag, "Parameter storage write failed");
+                    }
+#if CONFIG_LOGGER_SERIAL_OUTPUT
+                    ESP_LOGI(kTag, "param_csv=%.*s",
+                             static_cast<int>(line.length),
+                             line.buffer.data());
+#endif
+                    AppendPendingParameter(line);
+                }
             } else {
-                ESP_LOGE(kTag, "Parameter MQTT publish failed");
+                TimeInfo time_info{};
+                time_info.timestamp_us = event.failure.timestamp_us;
+                static_cast<void>(BuildTimeInfo(time_info));
+
+                CsvLine line{};
+                if (!FormatFailureCsv(event.failure, time_info, line)) {
+                    ESP_LOGE(kTag, "Format failure CSV failed");
+                } else {
+                    if (!mqtt::PublishFailure(line)) {
+                        ESP_LOGE(kTag, "Failure MQTT publish failed");
+                    }
+                    if (!storage::AppendFailure(time_info, line)) {
+                        ESP_LOGE(kTag, "Failure storage write failed");
+                    }
+#if CONFIG_LOGGER_SERIAL_OUTPUT
+                    ESP_LOGI(kTag, "failure_csv=%.*s",
+                             static_cast<int>(line.length),
+                             line.buffer.data());
+#endif
+                }
             }
         }
 
-        next_publish_us_ = now_us + kPublishPeriodUs;
+        const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
+        if (now_us >= next_publish_us_) {
+            if (g_pending_params.count > 0U) {
+                for (std::size_t i = 0U; i < g_pending_params.count; ++i) {
+                    const std::size_t idx = (g_pending_params.head + i) % kPendingParamsMax;
+                    g_publish_batch[i] = g_pending_params.lines[idx];
+                }
+
+                if (mqtt::PublishParameters(g_publish_batch.data(), g_pending_params.count)) {
+                    g_pending_params.head = 0U;
+                    g_pending_params.count = 0U;
+                } else {
+                    ESP_LOGE(kTag, "Parameter MQTT publish failed");
+                }
+            }
+
+            next_publish_us_ = now_us + kPublishPeriodUs;
+        }
     }
 }
 

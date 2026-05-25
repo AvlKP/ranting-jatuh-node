@@ -1,7 +1,10 @@
-.vscode/
+.vscode/*
+!.vscode/settings.json
 build/
 .agents/
 .github/
 managed_components/
 .antigravitycli/
+.gemini/
 sdkconfig*
+.agent/

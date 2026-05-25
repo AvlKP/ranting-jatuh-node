@@ -3,9 +3,11 @@
 #include <array>
 #include <cstddef>
 #include <cstdint>
+#include <mutex>
 #include "sdkconfig.h"
 #include "lsm6ds3.hpp"
 #include "complementary_filter.hpp"
+#include "monitor_events.hpp"
 
 namespace monitor {
 
@@ -73,8 +75,7 @@ public:
                      const MonitorConfig& config = {}) noexcept;
 
     [[nodiscard]] bool Init() noexcept;
-    void RegisterCallback(EventCb cb, void* ctx) noexcept;
-    void RegisterFailureCallback(FailureCb cb, void* ctx) noexcept;
+    [[nodiscard]] bool Start() noexcept;
     [[nodiscard]] bool Update(float dt_s) noexcept;
     [[nodiscard]] bool ReadImuSample(sensor::lsm6ds3::Value& gyro,
                                      sensor::lsm6ds3::Value& accel) noexcept;
@@ -82,6 +83,7 @@ public:
     void GetFftData(float* out_psd, std::size_t& out_len) const noexcept;
     void GetTiltHistory(float* out_roll, float* out_pitch, std::size_t& out_len, std::size_t max_len) const noexcept;
     void GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) const noexcept;
+    void TaskLoop() noexcept;
 
 private:
     [[nodiscard]] bool ReadImu(sensor::lsm6ds3::Value& gyro,
@@ -101,10 +103,9 @@ private:
     sensor::Lsm6ds3 imu_;
     filter::Complementary filter_;
     MonitorConfig config_;
-    EventCb callback_{nullptr};
-    void* callback_ctx_{nullptr};
-    FailureCb failure_callback_{nullptr};
-    void* failure_callback_ctx_{nullptr};
+
+    mutable std::mutex mutex_;
+    void* task_handle_{nullptr};
 
     std::array<float, kStorageSamples> roll_history_{};
     std::array<float, kStorageSamples> pitch_history_{};

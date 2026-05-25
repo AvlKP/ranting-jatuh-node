@@ -13,9 +13,11 @@
 #include "driver/spi_common.h"
 #include "esp_adc/adc_oneshot.h"
 #include "esp_err.h"
+#include "esp_event.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
+#include "sdmmc_cmd.h"
 #include "sdmmc_cmd.h"
 
 #include "pins.hpp"
@@ -180,6 +182,12 @@ extern "C" void app_main(void) {
     esp_log_level_set("httpd", ESP_LOG_INFO);
     esp_log_level_set("event", ESP_LOG_INFO);
 
+    const esp_err_t loop_err = esp_event_loop_create_default();
+    if (loop_err != ESP_OK && loop_err != ESP_ERR_INVALID_STATE) {
+        ESP_LOGE(kAppTag, "Default event loop creation failed: %s", esp_err_to_name(loop_err));
+        return;
+    }
+
     if (!InitImuI2c()) {
         ESP_LOGE(kAppTag, "I2C init failed");
         return;
@@ -217,8 +225,6 @@ extern "C" void app_main(void) {
         ESP_LOGE(kAppTag, "Logger init failed");
         return;
     }
-    monitor.RegisterCallback(&logger::Logger::MonitorCallback, &logger);
-    monitor.RegisterFailureCallback(&logger::Logger::FailureCallback, &logger);
 
 #if CONFIG_DASHBOARD_ENABLE
     static dashboard::Dashboard dashboard{monitor, logger};
@@ -229,11 +235,6 @@ extern "C" void app_main(void) {
         ESP_LOGE(kAppTag, "Dashboard start failed");
     }
 #endif
-
-    const float dt_s = 1.0f / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
-    const std::uint32_t rate_hz = static_cast<std::uint32_t>(CONFIG_MONITOR_IMU_RATE_HZ);
-    const std::uint32_t period_ms = (1000U + rate_hz - 1U) / rate_hz;
-    const TickType_t period_ticks = pdMS_TO_TICKS(period_ms);
 
 #if CONFIG_APP_VERIFY_ENABLE
     ESP_LOGI(kVerifyTag, "Verification start");
@@ -252,16 +253,24 @@ extern "C" void app_main(void) {
 
     static_cast<void>(verify::VerifySdStorage());
     static_cast<void>(verify::VerifyMqtt(logger));
-    static_cast<void>(verify::VerifyMonitorOutput(monitor, logger, dt_s, period_ticks));
+#endif
+
+    if (!logger.Start()) {
+        ESP_LOGE(kAppTag, "Logger task start failed");
+        return;
+    }
+
+    if (!monitor.Start()) {
+        ESP_LOGE(kAppTag, "Monitor task start failed");
+        return;
+    }
+
+#if CONFIG_APP_VERIFY_ENABLE
+    static_cast<void>(verify::VerifyMonitorOutput(logger));
     verify::LogStackHighWatermark("post-verify");
     ESP_LOGI(kVerifyTag, "Verification end");
 #endif
 
-    while (true) {
-        if (!monitor.Update(dt_s)) {
-            ESP_LOGW(kAppTag, "Monitor update failed");
-        }
-        logger.Poll();
-        vTaskDelay(period_ticks);
-    }
+    ESP_LOGI(kAppTag, "All tasks started, deleting app_main thread");
+    vTaskDelete(nullptr);
 }
