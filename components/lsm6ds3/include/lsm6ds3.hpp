@@ -91,7 +91,8 @@ public:
     bool read_accel_gyro(lsm6ds3::Value& out_gyro, lsm6ds3::Value& out_accel);
 
     // --- 3. Motion Detection ---
-    bool configure_motion_detection(uint8_t tap_ths = 0x09, uint8_t wakeup_ths = 0x02, uint8_t freefall_ths = 0x03);
+    bool configure_motion_detection(uint8_t tap_ths = 0x09, uint8_t wakeup_ths = 0x02,
+                                    uint8_t freefall_ths = 0x03, uint8_t ff_dur = 5);
 
     // --- 4. Tilt & Embedded Pedometer (AWT) ---
     bool enable_pedometer_and_tilt();

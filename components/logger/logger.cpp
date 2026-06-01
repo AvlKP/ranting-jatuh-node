@@ -289,23 +289,19 @@ void Logger::TaskLoop() noexcept {
             }
         }
 
-        const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
-        if (now_us >= next_publish_us_) {
-            if (g_pending_params.count > 0U) {
-                for (std::size_t i = 0U; i < g_pending_params.count; ++i) {
-                    const std::size_t idx = (g_pending_params.head + i) % kPendingParamsMax;
-                    g_publish_batch[i] = g_pending_params.lines[idx];
-                }
-
-                if (mqtt::PublishParameters(g_publish_batch.data(), g_pending_params.count)) {
-                    g_pending_params.head = 0U;
-                    g_pending_params.count = 0U;
-                } else {
-                    ESP_LOGE(kTag, "Parameter MQTT publish failed");
-                }
+        // Event-driven publish instead of periodic timer
+        if (g_pending_params.count > 0U) {
+            for (std::size_t i = 0U; i < g_pending_params.count; ++i) {
+                const std::size_t idx = (g_pending_params.head + i) % kPendingParamsMax;
+                g_publish_batch[i] = g_pending_params.lines[idx];
             }
 
-            next_publish_us_ = now_us + kPublishPeriodUs;
+            if (mqtt::PublishParameters(g_publish_batch.data(), g_pending_params.count)) {
+                g_pending_params.head = 0U;
+                g_pending_params.count = 0U;
+            } else {
+                ESP_LOGE(kTag, "Parameter MQTT publish failed");
+            }
         }
     }
 }

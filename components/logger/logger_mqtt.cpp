@@ -629,6 +629,18 @@ bool StartWifiPersistent() {
 
 } // namespace
 
+bool SyncTimeOnce() noexcept {
+    if (!ConnectWifi()) {
+        return false;
+    }
+    const bool synced = SyncTime();
+#if !CONFIG_DASHBOARD_ENABLE
+    esp_wifi_disconnect();
+    esp_wifi_stop();
+#endif
+    return synced;
+}
+
 bool Init() noexcept {
 #if CONFIG_DASHBOARD_ENABLE
     return StartWifiPersistent();

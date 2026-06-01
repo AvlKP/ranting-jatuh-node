@@ -56,6 +56,14 @@ config MONITOR_FREEFALL_THS
     help
         LSM6DS3 free-fall threshold (register value).
 
+config MONITOR_FF_DUR
+    int "Free-fall duration (FF_DUR)"
+    default 5
+    range 0 31
+    help
+        Free-fall duration event. Duration = FF_DUR + 1 in ODR cycles.
+        Each LSB extends duration by 1 ODR.
+
 config MONITOR_TARE_ENABLE
     bool "Enable tilt taring at startup"
     default y
@@ -74,6 +82,34 @@ config MONITOR_FFT_DE_MEAN_ENABLE
     default y
     help
         Removes the mean (DC component) from input tilt vector before performing FFT to avoid a 0Hz peak.
+
+config MONITOR_SHORT_BUFFER_SIZE
+    int "Short buffer size for variance"
+    default 256
+    range 10 1024
+    help
+        Size of the short buffer to compute live variance for IDLE/DISTURBED transitions.
+
+config MONITOR_K_IDLE_X100
+    int "IDLE to DISTURBED variance threshold multiplier (x100)"
+    default 150
+    range 100 1000
+    help
+        Multiplier (scaled by 100) for IDLE variance. E.g., 150 means short variance must exceed 1.5x of the 5-min IDLE variance.
+
+config MONITOR_K_DISTURBED_X100
+    int "DISTURBED to IDLE variance threshold multiplier (x100)"
+    default 110
+    range 50 1000
+    help
+        Multiplier (scaled by 100) for IDLE variance. E.g., 110 means short variance must fall below 1.1x of the 5-min IDLE variance.
+
+config MONITOR_N_DPAD
+    int "DISTURBED buffer refresh margin (samples)"
+    default 100
+    range 10 1000
+    help
+        Number of samples before the 5-min buffer is full at which the buffer will be refreshed during a prolonged DISTURBED state.
 
 endmenu
 

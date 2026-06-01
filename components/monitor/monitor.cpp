@@ -51,7 +51,8 @@ bool Monitor::Init() noexcept {
         return false;
     }
 
-    if (!imu_.configure_motion_detection(0x09, 0x02, static_cast<std::uint8_t>(CONFIG_MONITOR_FREEFALL_THS))) {
+    if (!imu_.configure_motion_detection(0x09, 0x02, static_cast<std::uint8_t>(CONFIG_MONITOR_FREEFALL_THS),
+                                        static_cast<std::uint8_t>(CONFIG_MONITOR_FF_DUR))) {
         return false;
     }
 
@@ -228,7 +229,33 @@ bool Monitor::Update(float dt_s) noexcept {
     CheckFailureEvents();
 
     if ((sample_count_ >= kStorageSamples) && (write_index_ == 0U)) {
-        return ComputeAndPublish();
+        if (state_ == NodeState::IDLE) {
+            MonitorResult result{};
+            if (ComputeStats(result)) {
+                idle_5min_roll_var_ = result.roll_variance;
+                idle_5min_pitch_var_ = result.pitch_variance;
+                has_baseline_variance_ = true;
+                
+                // For IDLE, we only want to publish the tilt statistics (mean, variance).
+                // Zero out the rest to avoid DC bias in dashboard/logger.
+                result.natural_freq_hz = 0.0f;
+                result.roll_damping_ratio = 0.0f;
+                result.pitch_damping_ratio = 0.0f;
+                result.roll_sway_pp_max = 0.0f;
+                result.roll_sway_pp_mean = 0.0f;
+                result.pitch_sway_pp_max = 0.0f;
+                result.pitch_sway_pp_mean = 0.0f;
+                
+                esp_event_post(MONITOR_EVENT_BASE,
+                               MONITOR_EVENT_RESULT,
+                               &result,
+                               sizeof(result),
+                               0);
+                
+                ESP_LOGI(kTag, "IDLE baseline updated. roll_var=%.3f pitch_var=%.3f",
+                         idle_5min_roll_var_, idle_5min_pitch_var_);
+            }
+        }
     }
 
     return true;
@@ -246,12 +273,107 @@ bool Monitor::ReadImu(sensor::lsm6ds3::Value& gyro,
 
 void Monitor::PushSample(float roll, float pitch) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
-    roll_history_[write_index_] = roll;
-    pitch_history_[write_index_] = pitch;
 
-    write_index_ = (write_index_ + 1U) % kStorageSamples;
-    if (sample_count_ < kStorageSamples) {
-        ++sample_count_;
+    // 1. Maintain short buffer and rolling sums
+    if (short_sample_count_ == kShortBufferSamples) {
+        const float old_roll = roll_short_[short_write_index_];
+        const float old_pitch = pitch_short_[short_write_index_];
+        roll_short_sum_ -= old_roll;
+        roll_short_sq_sum_ -= (old_roll * old_roll);
+        pitch_short_sum_ -= old_pitch;
+        pitch_short_sq_sum_ -= (old_pitch * old_pitch);
+    } else {
+        ++short_sample_count_;
+    }
+
+    roll_short_[short_write_index_] = roll;
+    pitch_short_[short_write_index_] = pitch;
+    roll_short_sum_ += roll;
+    roll_short_sq_sum_ += (roll * roll);
+    pitch_short_sum_ += pitch;
+    pitch_short_sq_sum_ += (pitch * pitch);
+
+    short_write_index_ = (short_write_index_ + 1U) % kShortBufferSamples;
+
+    // Calculate short variance
+    float short_roll_var = 0.0f;
+    float short_pitch_var = 0.0f;
+    if (short_sample_count_ > 1U) {
+        const float n = static_cast<float>(short_sample_count_);
+        short_roll_var = (roll_short_sq_sum_ - (roll_short_sum_ * roll_short_sum_) / n) / (n - 1.0f);
+        short_pitch_var = (pitch_short_sq_sum_ - (pitch_short_sum_ * pitch_short_sum_) / n) / (n - 1.0f);
+        if (short_roll_var < 0.0f) short_roll_var = 0.0f;
+        if (short_pitch_var < 0.0f) short_pitch_var = 0.0f;
+    }
+
+    // 2. State Machine Logic
+    if (state_ == NodeState::IDLE) {
+        roll_history_[write_index_] = roll;
+        pitch_history_[write_index_] = pitch;
+        write_index_ = (write_index_ + 1U) % kStorageSamples;
+        if (sample_count_ < kStorageSamples) {
+            ++sample_count_;
+        }
+
+        if (has_baseline_variance_) {
+            const float k_idle = static_cast<float>(CONFIG_MONITOR_K_IDLE_X100) / 100.0f;
+            if (short_roll_var > (idle_5min_roll_var_ * k_idle) || 
+                short_pitch_var > (idle_5min_pitch_var_ * k_idle)) {
+                
+                state_ = NodeState::DISTURBED;
+                
+                write_index_ = 0U;
+                sample_count_ = 0U;
+                
+                const std::size_t count = short_sample_count_;
+                for (std::size_t i = 0U; i < count; ++i) {
+                    const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
+                    roll_history_[i] = roll_short_[idx];
+                    pitch_history_[i] = pitch_short_[idx];
+                }
+                write_index_ = count;
+                sample_count_ = count;
+                
+                ESP_LOGI(kTag, "Transition: IDLE -> DISTURBED");
+            }
+        }
+    } else { // DISTURBED
+        roll_history_[write_index_] = roll;
+        pitch_history_[write_index_] = pitch;
+        write_index_ = (write_index_ + 1U) % kStorageSamples;
+        if (sample_count_ < kStorageSamples) {
+            ++sample_count_;
+        }
+
+        const float k_disturbed = static_cast<float>(CONFIG_MONITOR_K_DISTURBED_X100) / 100.0f;
+        
+        bool returned_to_idle = false;
+        if (short_roll_var < (idle_5min_roll_var_ * k_disturbed) && 
+            short_pitch_var < (idle_5min_pitch_var_ * k_disturbed)) {
+            
+            state_ = NodeState::IDLE;
+            returned_to_idle = true;
+            
+            ComputeAndPublish();
+            ESP_LOGI(kTag, "Transition: DISTURBED -> IDLE");
+        }
+        
+        if (!returned_to_idle && sample_count_ >= (kStorageSamples - static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD))) {
+            ComputeAndPublish();
+            ESP_LOGI(kTag, "DISTURBED Buffer Refreshed");
+            
+            write_index_ = 0U;
+            sample_count_ = 0U;
+            
+            const std::size_t count = short_sample_count_;
+            for (std::size_t i = 0U; i < count; ++i) {
+                const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
+                roll_history_[i] = roll_short_[idx];
+                pitch_history_[i] = pitch_short_[idx];
+            }
+            write_index_ = count;
+            sample_count_ = count;
+        }
     }
 }
 
@@ -265,13 +387,8 @@ bool Monitor::ComputeAndPublish() noexcept {
         return false;
     }
 
-    if (!ComputeNaturalFrequency(result)) {
-        return false;
-    }
-
-    if (!ComputeSwayAndDamping(result)) {
-        return false;
-    }
+    static_cast<void>(ComputeNaturalFrequency(result));
+    static_cast<void>(ComputeSwayAndDamping(result));
 
     ESP_LOGD(kTag,
              "roll_mean=%.3f roll_var=%.3f pitch_mean=%.3f pitch_var=%.3f "
@@ -340,6 +457,8 @@ bool Monitor::ComputeStats(MonitorResult& result) const noexcept {
 bool Monitor::ComputeNaturalFrequency(MonitorResult& result) noexcept {
     const std::size_t count = BufferSize();
     if (count < kFftWindowSamples) {
+        result.natural_freq_hz = 0.0f;
+        psd_accum_.fill(0.0f);
         return false;
     }
 

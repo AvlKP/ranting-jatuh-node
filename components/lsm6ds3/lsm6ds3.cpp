@@ -137,11 +137,14 @@ bool Lsm6ds3::read_accel_gyro(lsm6ds3::Value& out_gyro, lsm6ds3::Value& out_acce
 }
 
 // --- 3. Motion Detection ---
-bool Lsm6ds3::configure_motion_detection(uint8_t tap_ths, uint8_t wakeup_ths, uint8_t freefall_ths) {
+bool Lsm6ds3::configure_motion_detection(uint8_t tap_ths, uint8_t wakeup_ths, uint8_t freefall_ths,
+                                        uint8_t ff_dur) {
     if (!write_register(lsm6ds3::Register::TAP_CFG, 0x8E)) return false; // Enable interrupts and XYZ tap
     if (!write_register(lsm6ds3::Register::TAP_THS_6D, tap_ths & 0x1F)) return false;
     if (!write_register(lsm6ds3::Register::WAKE_UP_THS, wakeup_ths & 0x3F)) return false;
-    if (!write_register(lsm6ds3::Register::FREE_FALL, freefall_ths & 0x07)) return false;
+
+    uint8_t freefall = (freefall_ths & 0x07) | ((ff_dur & 0x1F) << 3);
+    if (!write_register(lsm6ds3::Register::FREE_FALL, freefall)) return false;
     return true;
 }
 

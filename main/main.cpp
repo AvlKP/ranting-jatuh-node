@@ -23,6 +23,7 @@
 #include "pins.hpp"
 #include "monitor.hpp"
 #include "logger.hpp"
+#include "logger_internal.hpp"
 #include "dashboard.hpp"
 #include "verify.hpp"
 
@@ -224,6 +225,13 @@ extern "C" void app_main(void) {
     if (!logger.Init(logger_cfg)) {
         ESP_LOGE(kAppTag, "Logger init failed");
         return;
+    }
+
+    ESP_LOGI(kAppTag, "Synchronizing system time via NTP at startup...");
+    if (logger::mqtt::SyncTimeOnce()) {
+        ESP_LOGI(kAppTag, "Startup NTP time synchronization successful");
+    } else {
+        ESP_LOGW(kAppTag, "Startup NTP time synchronization failed or timed-out. Continuing boot.");
     }
 
 #if CONFIG_DASHBOARD_ENABLE

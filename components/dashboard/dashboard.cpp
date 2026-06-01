@@ -305,6 +305,9 @@ const char* kIndexHtml = R"raw(<!DOCTYPE html>
                 </svg>
                 Heap: <span id="heap-val">0 KB</span>
             </div>
+            <div class="status-badge" id="node-state-badge" style="border-color: var(--success); color: var(--success);">
+                State: <span id="node-state-val">IDLE</span>
+            </div>
         </div>
     </header>
 
@@ -469,6 +472,17 @@ const char* kIndexHtml = R"raw(<!DOCTYPE html>
                 document.getElementById('wifi-dot').className = data.wifi_connected ? 'status-dot active' : 'status-dot inactive';
                 document.getElementById('mqtt-dot').className = data.mqtt_connected ? 'status-dot active' : 'status-dot inactive';
                 document.getElementById('heap-val').textContent = (data.heap_free / 1024).toFixed(1) + ' KB';
+
+                const stateBadge = document.getElementById('node-state-badge');
+                const stateVal = document.getElementById('node-state-val');
+                stateVal.textContent = data.node_state;
+                if (data.node_state === 'DISTURBED') {
+                    stateBadge.style.borderColor = 'var(--danger)';
+                    stateBadge.style.color = 'var(--danger)';
+                } else {
+                    stateBadge.style.borderColor = 'var(--success)';
+                    stateBadge.style.color = 'var(--success)';
+                }
 
                 // Update Sensor Table
                 const streamBody = document.getElementById('stream-body');
@@ -659,13 +673,15 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
         wifi_connected = true;
     }
 
+    const char* state_str = (g_self->monitor_.GetState() == monitor::NodeState::DISTURBED) ? "DISTURBED" : "IDLE";
     char chunk_buf[384];
     int len = std::snprintf(chunk_buf, sizeof(chunk_buf),
-                            "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,",
+                            "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,\"node_state\":\"%s\",",
                             wifi_connected ? "true" : "false",
                             g_self->logger_.HasMonitorResult() ? "true" : "false", // Use logger state as MQTT proxy
                             static_cast<unsigned long>(esp_get_free_heap_size()),
-                            CONFIG_MONITOR_IMU_RATE_HZ);
+                            CONFIG_MONITOR_IMU_RATE_HZ,
+                            state_str);
     httpd_resp_send_chunk(req, chunk_buf, len);
 
     // Latest Sensor Stream Table (20 samples)

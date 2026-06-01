@@ -57,6 +57,11 @@ struct MonitorResult {
 
 using EventCb = void(*)(void* ctx, const MonitorResult& result);
 
+enum class NodeState : std::uint8_t {
+    IDLE = 0,
+    DISTURBED = 1
+};
+
 enum class FailureEvent : std::uint8_t {
     FreeFall = 0,
     AcousticEmission = 1
@@ -83,6 +88,7 @@ public:
     void GetFftData(float* out_psd, std::size_t& out_len) const noexcept;
     void GetTiltHistory(float* out_roll, float* out_pitch, std::size_t& out_len, std::size_t max_len) const noexcept;
     void GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) const noexcept;
+    [[nodiscard]] NodeState GetState() const noexcept { return state_; }
     void TaskLoop() noexcept;
 
 private:
@@ -111,6 +117,22 @@ private:
     std::array<float, kStorageSamples> pitch_history_{};
     std::size_t write_index_{0U};
     std::size_t sample_count_{0U};
+
+    static constexpr std::size_t kShortBufferSamples = static_cast<std::size_t>(CONFIG_MONITOR_SHORT_BUFFER_SIZE);
+    std::array<float, kShortBufferSamples> roll_short_{};
+    std::array<float, kShortBufferSamples> pitch_short_{};
+    std::size_t short_write_index_{0U};
+    std::size_t short_sample_count_{0U};
+
+    float roll_short_sum_{0.0f};
+    float roll_short_sq_sum_{0.0f};
+    float pitch_short_sum_{0.0f};
+    float pitch_short_sq_sum_{0.0f};
+
+    NodeState state_{NodeState::IDLE};
+    float idle_5min_roll_var_{0.0f};
+    float idle_5min_pitch_var_{0.0f};
+    bool has_baseline_variance_{false};
 
     bool taring_complete_{false};
     float roll_offset_{0.0f};

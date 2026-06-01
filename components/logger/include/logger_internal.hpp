@@ -38,6 +38,7 @@ void SetMountPoint(const char* mount_point) noexcept;
 
 namespace mqtt {
 [[nodiscard]] bool Init() noexcept;
+[[nodiscard]] bool SyncTimeOnce() noexcept;
 [[nodiscard]] bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept;
 [[nodiscard]] bool PublishFailure(const CsvLine& line) noexcept;
 [[nodiscard]] bool PublishRaw(const char* topic, const char* payload, const char* content_type) noexcept;
