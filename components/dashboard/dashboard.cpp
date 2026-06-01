@@ -8,6 +8,7 @@
 #include <sys/stat.h>
 #include <cstdio>
 #include <cstring>
+#include <ctime>
 
 namespace dashboard {
 
@@ -691,11 +692,28 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
     std::size_t stream_count = 0U;
     g_self->monitor_.GetLatestSamples(stream_buf.data(), stream_count, kMaxStreamQuery);
 
+    const std::uint64_t current_uptime_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    std::time_t current_time = 0;
+    std::time(&current_time);
+
     for (std::size_t i = 0U; i < stream_count; ++i) {
+        std::uint64_t sample_ts_us = 0;
+        if (current_time >= 1672531200) {
+            const std::uint64_t current_time_us = static_cast<std::uint64_t>(current_time) * 1000000ULL;
+            if (current_uptime_us >= stream_buf[i].timestamp_us) {
+                const std::uint64_t age_us = current_uptime_us - stream_buf[i].timestamp_us;
+                sample_ts_us = current_time_us - age_us;
+            } else {
+                sample_ts_us = current_time_us;
+            }
+        } else {
+            sample_ts_us = stream_buf[i].timestamp_us;
+        }
+
         len = std::snprintf(chunk_buf, sizeof(chunk_buf),
                             "%s{\"ts\":%llu,\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,\"gx\":%.1f,\"gy\":%.1f,\"gz\":%.1f,\"r\":%.2f,\"p\":%.2f}",
                             (i > 0U) ? "," : "",
-                            static_cast<unsigned long long>(stream_buf[i].timestamp_us),
+                            static_cast<unsigned long long>(sample_ts_us),
                             stream_buf[i].accel_x, stream_buf[i].accel_y, stream_buf[i].accel_z,
                             stream_buf[i].gyro_x, stream_buf[i].gyro_y, stream_buf[i].gyro_z,
                             stream_buf[i].roll, stream_buf[i].pitch);
