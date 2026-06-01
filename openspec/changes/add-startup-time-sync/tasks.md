@@ -15,6 +15,6 @@
 
 ## 4. Verify
 
-- [ ] 4.1 Build and flash, confirm NTP sync log appears before monitor/logger task logs
-- [ ] 4.2 Verify SD card log timestamps are valid from first entry
-- [ ] 4.3 Test with WiFi unavailable — confirm boot continues with warning
+- [x] 4.1 Build and flash, confirm NTP sync log appears before monitor/logger task logs
+- [x] 4.2 Verify SD card log timestamps are valid from first entry
+- [x] 4.3 Test with WiFi unavailable — confirm boot continues with warning
