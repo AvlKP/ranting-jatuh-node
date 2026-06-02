@@ -9,6 +9,7 @@
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <cctype>
 
 namespace dashboard {
 
@@ -516,7 +517,7 @@ const char* kIndexHtml = R"raw(<!DOCTYPE html>
                                 <div class="file-name">${file.name}</div>
                                 <div class="file-size">${(file.size / 1024).toFixed(2)} KB</div>
                             </div>
-                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" style="cursor: pointer;">
+                            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" style="cursor: pointer;" onclick="window.location.href='/download?file=' + encodeURIComponent('${file.name}')">
                                 <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3"/>
                             </svg>
                         `;
@@ -638,6 +639,14 @@ esp_err_t Dashboard::Start(const Config& config) noexcept {
         .user_ctx  = nullptr
     };
     httpd_register_uri_handler(server_, &status_uri);
+
+    httpd_uri_t download_uri = {
+        .uri       = "/download",
+        .method    = HTTP_GET,
+        .handler   = DownloadHandler,
+        .user_ctx  = nullptr
+    };
+    httpd_register_uri_handler(server_, &download_uri);
 
     return ESP_OK;
 }
@@ -823,6 +832,87 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
     httpd_resp_send_chunk(req, "}", 1);
     httpd_resp_send_chunk(req, nullptr, 0); // End chunk transmission
     return ESP_OK;
+}
+
+void UrlDecode(char* dst, const char* src) {
+    char a, b;
+    while (*src) {
+        if ((*src == '%') &&
+            ((a = src[1]) && (b = src[2])) &&
+            (std::isxdigit(static_cast<unsigned char>(a)) && std::isxdigit(static_cast<unsigned char>(b)))) {
+            if (a >= 'a') a -= 'a' - 'A';
+            if (a >= 'A') a -= ('A' - 10);
+            else a -= '0';
+            if (b >= 'a') b -= 'a' - 'A';
+            if (b >= 'A') b -= ('A' - 10);
+            else b -= '0';
+            *dst++ = 16 * a + b;
+            src += 3;
+        } else if (*src == '+') {
+            *dst++ = ' ';
+            src++;
+        } else {
+            *dst++ = *src++;
+        }
+    }
+    *dst = '\0';
+}
+
+esp_err_t Dashboard::DownloadHandler(httpd_req_t* req) noexcept {
+    char query[256];
+    if (httpd_req_get_url_query_str(req, query, sizeof(query)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing query string");
+        return ESP_FAIL;
+    }
+
+    char raw_filename[128];
+    if (httpd_query_key_value(query, "file", raw_filename, sizeof(raw_filename)) != ESP_OK) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "Missing 'file' parameter");
+        return ESP_FAIL;
+    }
+
+    char filename[128];
+    UrlDecode(filename, raw_filename);
+
+    // Basic security: check for path traversal
+    if (std::strstr(filename, "..") != nullptr || std::strchr(filename, '/') != nullptr || std::strchr(filename, '\\') != nullptr) {
+        httpd_resp_send_err(req, HTTPD_403_FORBIDDEN, "Invalid file path");
+        return ESP_FAIL;
+    }
+
+    char file_path[512];
+    std::snprintf(file_path, sizeof(file_path), "%s/%s", CONFIG_APP_SD_MOUNT_POINT, filename);
+
+    FILE* f = std::fopen(file_path, "rb");
+    if (f == nullptr) {
+        httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
+        return ESP_FAIL;
+    }
+
+    // Set headers
+    httpd_resp_set_type(req, "application/octet-stream");
+    
+    char disposition[256];
+    std::snprintf(disposition, sizeof(disposition), "attachment; filename=\"%s\"", filename);
+    httpd_resp_set_hdr(req, "Content-Disposition", disposition);
+
+    // Send file contents in chunks
+    char chunk_buf[1024];
+    size_t read_bytes;
+    esp_err_t err = ESP_OK;
+    while ((read_bytes = std::fread(chunk_buf, 1, sizeof(chunk_buf), f)) > 0) {
+        err = httpd_resp_send_chunk(req, chunk_buf, read_bytes);
+        if (err != ESP_OK) {
+            ESP_LOGE(kTag, "Failed to send chunk: %s", esp_err_to_name(err));
+            break;
+        }
+    }
+    std::fclose(f);
+
+    // End chunk transmission
+    httpd_resp_send_chunk(req, nullptr, 0);
+
+    return err;
 }
 
 } // namespace dashboard

@@ -25,6 +25,7 @@ private:
     static esp_err_t IndexHandler(httpd_req_t* req) noexcept;
     static esp_err_t StatusHandler(httpd_req_t* req) noexcept;
     static esp_err_t ConfigHandler(httpd_req_t* req) noexcept;
+    static esp_err_t DownloadHandler(httpd_req_t* req) noexcept;
 
     monitor::Monitor& monitor_;
     logger::Logger& logger_;
