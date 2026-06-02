@@ -7,7 +7,7 @@
 
 namespace logger {
 
-constexpr std::size_t kCsvLineMax = 256U;
+constexpr std::size_t kCsvLineMax = 512U;
 
 struct CsvLine {
     std::array<char, kCsvLineMax> buffer{};

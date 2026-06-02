@@ -39,6 +39,12 @@ struct MonitorConfig {
     std::size_t peak_min_spacing{static_cast<std::size_t>(CONFIG_MONITOR_PEAK_MIN_SPACING_SAMPLES)};
 };
 
+enum class NodeState : std::uint8_t {
+    IDLE = 0,
+    DISTURBED = 1,
+    FREE_DECAY = 2
+};
+
 struct MonitorResult {
     float roll_mean{0.0f};
     float roll_variance{0.0f};
@@ -51,16 +57,14 @@ struct MonitorResult {
     float roll_damping_ratio{0.0f};
     float pitch_damping_ratio{0.0f};
     float natural_freq_hz{0.0f};
+    float natural_freq_roll_hz{0.0f};
+    float natural_freq_pitch_hz{0.0f};
+    NodeState state{NodeState::IDLE};
     std::uint32_t sample_count{0};
     std::uint64_t timestamp_us{0};
 };
 
 using EventCb = void(*)(void* ctx, const MonitorResult& result);
-
-enum class NodeState : std::uint8_t {
-    IDLE = 0,
-    DISTURBED = 1
-};
 
 enum class FailureEvent : std::uint8_t {
     FreeFall = 0,
@@ -94,10 +98,11 @@ public:
 private:
     [[nodiscard]] bool ReadImu(sensor::lsm6ds3::Value& gyro,
                                sensor::lsm6ds3::Value& accel) noexcept;
-    void PushSample(float roll, float pitch) noexcept;
-    [[nodiscard]] bool ComputeAndPublish() noexcept;
+    void PushSample(float roll, float pitch, float ax, float ay, float az) noexcept;
+    [[nodiscard]] bool ComputeAndPublish(NodeState pub_state) noexcept;
     [[nodiscard]] bool ComputeStats(MonitorResult& result) const noexcept;
     [[nodiscard]] bool ComputeNaturalFrequency(MonitorResult& result) noexcept;
+    [[nodiscard]] float ComputeAxisNaturalFrequency(const std::array<float, kStorageSamples>& history, std::size_t start_phys_idx, std::size_t count) noexcept;
     [[nodiscard]] bool ComputeSwayAndDamping(MonitorResult& result) noexcept;
     void CheckFailureEvents() noexcept;
     void PublishFailure(FailureEvent event) noexcept;
@@ -128,6 +133,23 @@ private:
     float roll_short_sq_sum_{0.0f};
     float pitch_short_sum_{0.0f};
     float pitch_short_sq_sum_{0.0f};
+
+    static constexpr std::size_t kAccelErrShortBufferSamples = static_cast<std::size_t>(CONFIG_MONITOR_ACCEL_ERR_SHORT_BUF_SIZE);
+    std::array<float, kAccelErrShortBufferSamples> accel_err_short_{};
+    std::size_t accel_err_short_write_index_{0U};
+    std::size_t accel_err_short_sample_count_{0U};
+    float accel_err_short_sum_{0.0f};
+    float accel_err_short_sq_sum_{0.0f};
+    float accel_err_baseline_var_{0.0f};
+    bool has_accel_err_baseline_{false};
+    float baseline_accum_sum_{0.0f};
+    float baseline_accum_sq_sum_{0.0f};
+    std::size_t baseline_sample_count_{0U};
+
+    std::size_t decay_start_index_{0U};
+    std::size_t decay_sample_count_{0U};
+    std::size_t free_decay_debounce_counter_{0U};
+    std::uint64_t free_decay_entry_time_us_{0ULL};
 
     NodeState state_{NodeState::IDLE};
     float idle_5min_roll_var_{0.0f};

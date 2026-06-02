@@ -10,30 +10,54 @@ This document defines the MQTT interface used for communication between the IoT 
 ## Topics and Payloads
 
 ### 1. Monitoring Parameters
-Node publishes batches of processed monitoring data periodically.
+Node publishes processed monitoring data event-driven upon state transitions or refreshes.
 
 - **Topic**: `ranting/parameters`
-- **Content Type**: `text/csv`
-- **Publish Frequency**: Default every 6 hours (configurable via `LOGGER_WIFI_PERIOD_HOURS`).
-- **CSV Format**:
-  `unix_time,timestamp_us,roll_mean,pitch_mean,roll_variance,pitch_variance,roll_sway_pp_max,roll_sway_pp_mean,pitch_sway_pp_max,pitch_sway_pp_mean,roll_damping_ratio,pitch_damping_ratio,natural_freq_hz,sample_count`
+- **Content Type**: `application/json`
+- **Publish Frequency**: Immediate upon transition to `FREE_DECAY`, exit from `FREE_DECAY` (to `IDLE`), or intermediate buffer refresh.
+- **JSON Payload Schema**:
 
-| Column | Type | Description |
-|--------|------|-------------|
+```json
+{
+  "unix_time": 1672531200,
+  "timestamp_us": 12345678,
+  "roll_mean": 0.05,
+  "pitch_mean": -0.02,
+  "roll_variance": 0.001,
+  "pitch_variance": 0.001,
+  "roll_sway_pp_max": 2.5,
+  "roll_sway_pp_mean": 1.2,
+  "pitch_sway_pp_max": 1.8,
+  "pitch_sway_pp_mean": 0.9,
+  "roll_damping_ratio": 0.045,
+  "pitch_damping_ratio": 0.038,
+  "natural_freq_hz": 4.15,
+  "natural_freq_roll_hz": 4.15,
+  "natural_freq_pitch_hz": 3.85,
+  "state": "FREE_DECAY",
+  "sample_count": 512
+}
+```
+
+| Field | Type | Description |
+|-------|------|-------------|
 | `unix_time` | `int64` | UTC Epoch time in seconds. 0 if time not synced. |
 | `timestamp_us` | `uint64` | Monotonic system time in microseconds since boot. |
 | `roll_mean` | `float` | Mean roll angle in degrees. |
 | `pitch_mean` | `float` | Mean pitch angle in degrees. |
 | `roll_variance` | `float` | Variance of roll angle. |
 | `pitch_variance` | `float` | Variance of pitch angle. |
-| `roll_sway_pp_max` | `float` | Max peak-to-peak roll sway. |
-| `roll_sway_pp_mean` | `float` | Mean peak-to-peak roll sway. |
-| `pitch_sway_pp_max` | `float` | Max peak-to-peak pitch sway. |
-| `pitch_sway_pp_mean` | `float` | Mean peak-to-peak pitch sway. |
-| `roll_damping_ratio` | `float` | Estimated damping ratio for roll. |
-| `pitch_damping_ratio` | `float` | Estimated damping ratio for pitch. |
-| `natural_freq_hz` | `float` | Estimated natural frequency in Hz. |
-| `sample_count` | `uint32` | Number of samples in the window. |
+| `roll_sway_pp_max` | `float` | Max peak-to-peak roll sway in degrees. |
+| `roll_sway_pp_mean` | `float` | Mean peak-to-peak roll sway in degrees. |
+| `pitch_sway_pp_max` | `float` | Max peak-to-peak pitch sway in degrees. |
+| `pitch_sway_pp_mean` | `float` | Mean peak-to-peak pitch sway in degrees. |
+| `roll_damping_ratio` | `float` | Estimated damping ratio for roll (0.0 in DISTURBED). |
+| `pitch_damping_ratio` | `float` | Estimated damping ratio for pitch (0.0 in DISTURBED). |
+| `natural_freq_hz` | `float` | Estimated natural frequency in Hz (max of roll/pitch). |
+| `natural_freq_roll_hz` | `float` | Estimated natural frequency for roll in Hz (0.0 in DISTURBED/IDLE). |
+| `natural_freq_pitch_hz` | `float` | Estimated natural frequency for pitch in Hz (0.0 in DISTURBED/IDLE). |
+| `state` | `string` | FSM state that produced this payload: `"IDLE"`, `"DISTURBED"`, or `"FREE_DECAY"`. |
+| `sample_count` | `uint32` | Number of samples in the calculation window. |
 
 ### 2. Failure Events
 Node publishes immediate notifications when a failure event is detected.

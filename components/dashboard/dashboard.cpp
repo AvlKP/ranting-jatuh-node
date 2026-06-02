@@ -481,6 +481,9 @@ const char* kIndexHtml = R"raw(<!DOCTYPE html>
                 if (data.node_state === 'DISTURBED') {
                     stateBadge.style.borderColor = 'var(--danger)';
                     stateBadge.style.color = 'var(--danger)';
+                } else if (data.node_state === 'FREE_DECAY') {
+                    stateBadge.style.borderColor = 'var(--warning)';
+                    stateBadge.style.color = 'var(--warning)';
                 } else {
                     stateBadge.style.borderColor = 'var(--success)';
                     stateBadge.style.color = 'var(--success)';
@@ -683,7 +686,12 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
         wifi_connected = true;
     }
 
-    const char* state_str = (g_self->monitor_.GetState() == monitor::NodeState::DISTURBED) ? "DISTURBED" : "IDLE";
+    const char* state_str = "IDLE";
+    if (g_self->monitor_.GetState() == monitor::NodeState::DISTURBED) {
+        state_str = "DISTURBED";
+    } else if (g_self->monitor_.GetState() == monitor::NodeState::FREE_DECAY) {
+        state_str = "FREE_DECAY";
+    }
     char chunk_buf[384];
     int len = std::snprintf(chunk_buf, sizeof(chunk_buf),
                             "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,\"node_state\":\"%s\",",

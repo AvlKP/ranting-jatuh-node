@@ -125,6 +125,56 @@ config MONITOR_N_DPAD
     help
         Number of samples before the 5-min buffer is full at which the buffer will be refreshed during a prolonged DISTURBED state.
 
+config MONITOR_K_HIGH_X100
+    int "IDLE to DISTURBED accel error threshold multiplier (x100)"
+    default 150
+    range 100 1000
+    help
+        Multiplier (scaled by 100) for baseline accel error variance. E.g., 150 means accel_err variance must exceed 1.5x of the baseline.
+
+config MONITOR_K_MID_X100
+    int "DISTURBED to FREE_DECAY accel error threshold multiplier (x100)"
+    default 120
+    range 50 1000
+    help
+        Multiplier (scaled by 100) for baseline accel error variance. E.g., 120 means accel_err variance must drop below 1.2x of the baseline.
+
+config MONITOR_K_LOW_X100
+    int "FREE_DECAY to IDLE accel error threshold multiplier (x100)"
+    default 110
+    range 50 1000
+    help
+        Multiplier (scaled by 100) for baseline accel error variance. E.g., 110 means accel_err variance must drop below 1.1x of the baseline.
+
+config MONITOR_ACCEL_ERR_SHORT_BUF_SIZE
+    int "Accelerometer error short buffer size"
+    default 256
+    range 10 1024
+    help
+        Size of the short buffer to compute accelerometer error variance.
+
+config MONITOR_ABS_MIN_ACCEL_VAR_X1000000
+    int "Absolute minimum accelerometer error variance floor (x1000000)"
+    default 100
+    range 1 1000000
+    help
+        Absolute minimum accelerometer error variance floor (scaled by 1000000). E.g., 100 means floor is 0.0001 g^2.
+
+config MONITOR_FREE_DECAY_DEBOUNCE
+    int "DISTURBED to FREE_DECAY debounce count (samples)"
+    default 128
+    range 1 1000
+    help
+        Number of consecutive samples below the mid threshold to transition to FREE_DECAY.
+
+config MONITOR_FREE_DECAY_TIMEOUT_S
+    int "FREE_DECAY state timeout (seconds)"
+    default 120
+    range 1 3600
+    help
+        Timeout in seconds for the FREE_DECAY state before returning to IDLE.
+
 endmenu
+
 
 

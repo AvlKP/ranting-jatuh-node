@@ -105,9 +105,25 @@ bool FormatParameterCsv(const monitor::MonitorResult& result,
                         const TimeInfo& time_info,
                         CsvLine& line) noexcept {
     const std::int64_t unix_time = time_info.valid ? time_info.unix_time : 0;
+    
+    const char* state_str = "IDLE";
+    if (result.state == monitor::NodeState::DISTURBED) {
+        state_str = "DISTURBED";
+    } else if (result.state == monitor::NodeState::FREE_DECAY) {
+        state_str = "FREE_DECAY";
+    }
+
     const int len = std::snprintf(line.buffer.data(),
                                   line.buffer.size(),
-                                  "%lld,%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.3f,%u\n",
+                                  "{\"unix_time\":%lld,\"timestamp_us\":%llu,"
+                                  "\"roll_mean\":%.3f,\"pitch_mean\":%.3f,"
+                                  "\"roll_variance\":%.3f,\"pitch_variance\":%.3f,"
+                                  "\"roll_sway_pp_max\":%.3f,\"roll_sway_pp_mean\":%.3f,"
+                                  "\"pitch_sway_pp_max\":%.3f,\"pitch_sway_pp_mean\":%.3f,"
+                                  "\"roll_damping_ratio\":%.4f,\"pitch_damping_ratio\":%.4f,"
+                                  "\"natural_freq_hz\":%.3f,\"natural_freq_roll_hz\":%.3f,"
+                                  "\"natural_freq_pitch_hz\":%.3f,\"state\":\"%s\","
+                                  "\"sample_count\":%u}\n",
                                   static_cast<long long>(unix_time),
                                   static_cast<unsigned long long>(time_info.timestamp_us),
                                   result.roll_mean,
@@ -121,6 +137,9 @@ bool FormatParameterCsv(const monitor::MonitorResult& result,
                                   result.roll_damping_ratio,
                                   result.pitch_damping_ratio,
                                   result.natural_freq_hz,
+                                  result.natural_freq_roll_hz,
+                                  result.natural_freq_pitch_hz,
+                                  state_str,
                                   static_cast<unsigned>(result.sample_count));
     if (len <= 0 || static_cast<std::size_t>(len) >= line.buffer.size()) {
         return false;

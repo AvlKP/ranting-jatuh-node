@@ -429,7 +429,7 @@ bool EnsureMqttClient() {
     return true;
 }
 
-bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count) {
+bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count, const char* content_type) {
     if (topic == nullptr || lines == nullptr) {
         return false;
     }
@@ -468,7 +468,7 @@ bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count) {
         }
 
         s_publish_property.payload_format_indicator = true;
-        s_publish_property.content_type = "text/csv";
+        s_publish_property.content_type = content_type;
         if (esp_mqtt5_client_set_publish_property(s_client, &s_publish_property) != ESP_OK) {
             ESP_LOGE(kTag, "MQTT5 publish property set failed");
             ok = false;
@@ -654,7 +654,7 @@ bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept {
         return true;
     }
 
-    const bool ok = PublishLines(CONFIG_LOGGER_MQTT_TOPIC_PARAMETERS, lines, count);
+    const bool ok = PublishLines(CONFIG_LOGGER_MQTT_TOPIC_PARAMETERS, lines, count, "application/json");
 #if !CONFIG_DASHBOARD_ENABLE
     esp_wifi_disconnect();
     esp_wifi_stop();
@@ -663,7 +663,7 @@ bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept {
 }
 
 bool PublishFailure(const CsvLine& line) noexcept {
-    const bool ok = PublishLines(CONFIG_LOGGER_MQTT_TOPIC_FAILURES, &line, 1U);
+    const bool ok = PublishLines(CONFIG_LOGGER_MQTT_TOPIC_FAILURES, &line, 1U, "text/csv");
 #if !CONFIG_DASHBOARD_ENABLE
     esp_wifi_disconnect();
     esp_wifi_stop();
