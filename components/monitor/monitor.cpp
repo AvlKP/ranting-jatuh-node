@@ -2,6 +2,7 @@
 
 #include <cmath>
 #include <cstdio>
+#include <algorithm>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -121,6 +122,7 @@ bool Monitor::Init() noexcept {
     roll_tare_sum_ = 0.0f;
     pitch_tare_sum_ = 0.0f;
     tare_samples_accumulated_ = 0U;
+    tare_settle_accumulated_ = 0U;
 
     return true;
 }
@@ -176,27 +178,31 @@ bool Monitor::Update(float dt_s) noexcept {
         current_roll -= roll_offset_;
         current_pitch -= pitch_offset_;
     } else {
-        roll_tare_sum_ += current_roll;
-        pitch_tare_sum_ += current_pitch;
-        ++tare_samples_accumulated_;
-        if (tare_samples_accumulated_ >= static_cast<std::size_t>(CONFIG_MONITOR_TARE_SAMPLES)) {
-            roll_offset_ = roll_tare_sum_ / static_cast<float>(CONFIG_MONITOR_TARE_SAMPLES);
-            pitch_offset_ = pitch_tare_sum_ / static_cast<float>(CONFIG_MONITOR_TARE_SAMPLES);
-            taring_complete_ = true;
-            ESP_LOGI(kTag, "Taring complete: roll_offset=%.3f pitch_offset=%.3f over %d samples",
-                     roll_offset_, pitch_offset_, CONFIG_MONITOR_TARE_SAMPLES);
+        if (tare_settle_accumulated_ < static_cast<std::size_t>(CONFIG_MONITOR_TARE_SETTLE_SAMPLES)) {
+            ++tare_settle_accumulated_;
+        } else {
+            roll_tare_sum_ += current_roll;
+            pitch_tare_sum_ += current_pitch;
+            ++tare_samples_accumulated_;
+            if (tare_samples_accumulated_ >= static_cast<std::size_t>(CONFIG_MONITOR_TARE_SAMPLES)) {
+                roll_offset_ = roll_tare_sum_ / static_cast<float>(CONFIG_MONITOR_TARE_SAMPLES);
+                pitch_offset_ = pitch_tare_sum_ / static_cast<float>(CONFIG_MONITOR_TARE_SAMPLES);
+                taring_complete_ = true;
+                ESP_LOGI(kTag, "Taring complete: roll_offset=%.3f pitch_offset=%.3f over %d samples",
+                         roll_offset_, pitch_offset_, CONFIG_MONITOR_TARE_SAMPLES);
 
-            for (std::size_t i = 0U; i < write_index_; ++i) {
-                roll_history_[i] -= roll_offset_;
-                pitch_history_[i] -= pitch_offset_;
-            }
-            for (std::size_t i = 0U; i < stream_count_; ++i) {
-                stream_samples_[i].roll -= roll_offset_;
-                stream_samples_[i].pitch -= pitch_offset_;
-            }
+                for (std::size_t i = 0U; i < write_index_; ++i) {
+                    roll_history_[i] -= roll_offset_;
+                    pitch_history_[i] -= pitch_offset_;
+                }
+                for (std::size_t i = 0U; i < stream_count_; ++i) {
+                    stream_samples_[i].roll -= roll_offset_;
+                    stream_samples_[i].pitch -= pitch_offset_;
+                }
 
-            current_roll -= roll_offset_;
-            current_pitch -= pitch_offset_;
+                current_roll -= roll_offset_;
+                current_pitch -= pitch_offset_;
+            }
         }
     }
 #endif
@@ -307,6 +313,8 @@ void Monitor::PushSample(float roll, float pitch) noexcept {
     }
 
     // 2. State Machine Logic
+    const float abs_min_var = static_cast<float>(CONFIG_MONITOR_ABS_MIN_VAR_X10000) / 10000.0f;
+
     if (state_ == NodeState::IDLE) {
         roll_history_[write_index_] = roll;
         pitch_history_[write_index_] = pitch;
@@ -317,8 +325,11 @@ void Monitor::PushSample(float roll, float pitch) noexcept {
 
         if (has_baseline_variance_) {
             const float k_idle = static_cast<float>(CONFIG_MONITOR_K_IDLE_X100) / 100.0f;
-            if (short_roll_var > (idle_5min_roll_var_ * k_idle) || 
-                short_pitch_var > (idle_5min_pitch_var_ * k_idle)) {
+            const float threshold_roll = std::max(idle_5min_roll_var_ * k_idle, abs_min_var);
+            const float threshold_pitch = std::max(idle_5min_pitch_var_ * k_idle, abs_min_var);
+
+            if (short_roll_var > threshold_roll || 
+                short_pitch_var > threshold_pitch) {
                 
                 state_ = NodeState::DISTURBED;
                 
@@ -346,10 +357,12 @@ void Monitor::PushSample(float roll, float pitch) noexcept {
         }
 
         const float k_disturbed = static_cast<float>(CONFIG_MONITOR_K_DISTURBED_X100) / 100.0f;
+        const float threshold_roll = std::max(idle_5min_roll_var_ * k_disturbed, abs_min_var);
+        const float threshold_pitch = std::max(idle_5min_pitch_var_ * k_disturbed, abs_min_var);
         
         bool returned_to_idle = false;
-        if (short_roll_var < (idle_5min_roll_var_ * k_disturbed) && 
-            short_pitch_var < (idle_5min_pitch_var_ * k_disturbed)) {
+        if (short_roll_var < threshold_roll && 
+            short_pitch_var < threshold_pitch) {
             
             state_ = NodeState::IDLE;
             returned_to_idle = true;
@@ -456,10 +469,87 @@ bool Monitor::ComputeStats(MonitorResult& result) const noexcept {
 
 bool Monitor::ComputeNaturalFrequency(MonitorResult& result) noexcept {
     const std::size_t count = BufferSize();
-    if (count < kFftWindowSamples) {
+    if (count == 0U) {
         result.natural_freq_hz = 0.0f;
         psd_accum_.fill(0.0f);
         return false;
+    }
+
+    const float sample_rate_hz = static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+
+    if (count < kFftWindowSamples) {
+        const std::size_t fft_size = (count < 512U) ? 512U : 1024U;
+
+        std::fill(fft_input_.begin(), fft_input_.begin() + (fft_size * 2U), 0.0f);
+        psd_accum_.fill(0.0f);
+
+        float mean = 0.0f;
+#if CONFIG_MONITOR_FFT_DE_MEAN_ENABLE
+        float sum = 0.0f;
+        for (std::size_t i = 0U; i < count; ++i) {
+            const std::size_t idx = PhysicalIndex(i);
+            const float roll = roll_history_[idx];
+            const float pitch = pitch_history_[idx];
+            const float magnitude = std::sqrt((roll * roll) + (pitch * pitch));
+            fft_input_[2U * i] = magnitude;
+            sum += magnitude;
+        }
+        mean = sum / static_cast<float>(count);
+#endif
+
+        for (std::size_t i = 0U; i < count; ++i) {
+            float magnitude = 0.0f;
+#if CONFIG_MONITOR_FFT_DE_MEAN_ENABLE
+            magnitude = fft_input_[2U * i] - mean;
+#else
+            const std::size_t idx = PhysicalIndex(i);
+            const float roll = roll_history_[idx];
+            const float pitch = pitch_history_[idx];
+            magnitude = std::sqrt((roll * roll) + (pitch * pitch));
+#endif
+
+            const float window = (count > 1U) ? (0.5f - 0.5f * std::cos(kTwoPi * static_cast<float>(i) / static_cast<float>(count - 1U))) : 1.0f;
+            fft_input_[2U * i] = magnitude * window;
+            fft_input_[2U * i + 1U] = 0.0f;
+        }
+
+        if (dsps_fft2r_fc32(fft_input_.data(), static_cast<int>(fft_size)) != ESP_OK) {
+            return false;
+        }
+        if (dsps_bit_rev_fc32(fft_input_.data(), static_cast<int>(fft_size)) != ESP_OK) {
+            return false;
+        }
+
+        float max_val = 0.0f;
+        std::size_t max_bin = 0U;
+
+        for (std::size_t bin = 1U; bin < (fft_size / 2U); ++bin) {
+            const float real = fft_input_[2U * bin];
+            const float imag = fft_input_[2U * bin + 1U];
+            const float power = (real * real) + (imag * imag);
+
+            if (power > max_val) {
+                max_val = power;
+                max_bin = bin;
+            }
+
+            if (fft_size == 512U) {
+                psd_accum_[2U * bin] = power;
+                psd_accum_[2U * bin + 1U] = power;
+            } else {
+                psd_accum_[bin] = power;
+            }
+        }
+
+        result.natural_freq_hz = (static_cast<float>(max_bin) * sample_rate_hz) /
+                                 static_cast<float>(fft_size);
+
+        if (LOG_LOCAL_LEVEL >= ESP_LOG_DEBUG) {
+            printf("MONITOR: FFT PSD Padded Single-Window Output Plot (Size %u):\n", (unsigned int)fft_size);
+            dsps_view(psd_accum_.data(), kFftWindowSamples / 2U, 64, 10, 0.0f, max_val, '|');
+        }
+
+        return true;
     }
 
     const std::size_t step = kFftWindowSamples - kFftOverlapSamples;
@@ -529,7 +619,6 @@ bool Monitor::ComputeNaturalFrequency(MonitorResult& result) noexcept {
         }
     }
 
-    const float sample_rate_hz = static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
     result.natural_freq_hz = (static_cast<float>(max_bin) * sample_rate_hz) /
                              static_cast<float>(kFftWindowSamples);
 

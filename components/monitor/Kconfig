@@ -77,6 +77,13 @@ config MONITOR_TARE_SAMPLES
     help
         Number of initial samples to average for the baseline tare offset calculation.
 
+config MONITOR_TARE_SETTLE_SAMPLES
+    int "Tilt tare settling sample count"
+    default 500
+    range 0 5000
+    help
+        Number of initial samples to discard at startup to allow the Madgwick/Complementary filter to converge before taring.
+
 config MONITOR_FFT_DE_MEAN_ENABLE
     bool "Enable de-meaning/zero-centering of FFT input"
     default y
@@ -103,6 +110,13 @@ config MONITOR_K_DISTURBED_X100
     range 50 1000
     help
         Multiplier (scaled by 100) for IDLE variance. E.g., 110 means short variance must fall below 1.1x of the 5-min IDLE variance.
+
+config MONITOR_ABS_MIN_VAR_X10000
+    int "Absolute minimum variance floor (x10000)"
+    default 50
+    range 1 10000
+    help
+        Absolute minimum variance floor (scaled by 10000). E.g., 50 means absolute floor is 0.005 deg^2. Used to prevent false transitions on very still devices.
 
 config MONITOR_N_DPAD
     int "DISTURBED buffer refresh margin (samples)"

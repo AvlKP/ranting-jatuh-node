@@ -140,6 +140,7 @@ private:
     float roll_tare_sum_{0.0f};
     float pitch_tare_sum_{0.0f};
     std::size_t tare_samples_accumulated_{0U};
+    std::size_t tare_settle_accumulated_{0U};
 
     std::array<float, kFftWindowSamples * 2U> fft_input_{};
     std::array<float, kFftWindowSamples / 2U> psd_accum_{};

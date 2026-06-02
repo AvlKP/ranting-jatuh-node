@@ -11,5 +11,6 @@
     "--background-index",
     "--query-driver=**",
     "--compile-commands-dir=c:\\Users\\avila\\Documents\\projects\\ranting-jatuh-node\\build"
-  ]
+  ],
+  "idf.portWin": "COM7"
 }
