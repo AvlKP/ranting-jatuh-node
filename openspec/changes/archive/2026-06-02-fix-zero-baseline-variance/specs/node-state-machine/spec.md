@@ -1,27 +1,4 @@
-# node-state-machine Specification
-
-## Purpose
-Baseline state machine for node monitoring, managing transition logic between IDLE and DISTURBED states based on rolling variance statistics.
-## Requirements
-### Requirement: Node State Machine Initialization
-The node SHALL initialize in the `IDLE` state upon startup, maintaining a short variance buffer.
-- `short_buffer_size`, `K_IDLE`, `K_DISTURBED`, and `N_DPAD` SHALL be configured via Kconfig.
-- Kconfig parameters for floats (e.g., `K_IDLE`, `K_DISTURBED`) SHALL be implemented as scaled integers to comply with ESP-IDF Kconfig limitations.
-
-#### Scenario: System Startup
-- **WHEN** the IoT node is powered on and monitoring starts
-- **THEN** the system enters the `IDLE` state
-- **THEN** it calculates only tilt statistics (mean, variance) per 5-minute window
-- **THEN** it pre-allocates a compile-time fixed-size `std::array` for the short buffer
-
-### Requirement: Live Variance Calculation
-The node SHALL calculate variance live in the short buffer on every new sample to evaluate state transitions immediately.
-- The live variance calculation MUST be an O(1) rolling algorithm (maintaining sum and sum-of-squares) to ensure deterministic execution time per sample.
-
-#### Scenario: Live rolling variance calculation
-- **WHEN** a new IMU sample is pushed to the short buffer
-- **THEN** the system SHALL update the rolling sums and rolling sum of squares
-- **THEN** the rolling variance SHALL be computed in O(1) time complexity
+## MODIFIED Requirements
 
 ### Requirement: Transition to DISTURBED
 The node SHALL transition to the `DISTURBED` state based on short-term variance, provided a baseline variance is available. The transition threshold SHALL be the greater of the relative threshold (`baseline * K_IDLE`) and the absolute minimum variance floor (`K_ABS_MIN_VAR`).
@@ -56,14 +33,7 @@ The node SHALL perform heavy calculations and send data immediately upon leaving
 - **WHEN** the live short buffer variance falls below `K_ABS_MIN_VAR`
 - **THEN** the state transitions back to `IDLE` (floor provides an achievable threshold)
 
-### Requirement: DISTURBED Buffer Refresh
-The node SHALL prevent buffer overflow during prolonged disturbances by refreshing the state and computing intermediate parameters.
-
-#### Scenario: Buffer Nearing Capacity
-- **WHEN** the node is in the `DISTURBED` state
-- **WHEN** the 5-minute buffer is `N_DPAD` away from being full
-- **THEN** the natural frequency, damping ratio, SAMEAN, and SAMAX are calculated from the current `DISTURBED` buffer and sent immediately
-- **THEN** the node immediately transitions to `DISTURBED` again to refresh the buffer
+## ADDED Requirements
 
 ### Requirement: Absolute Minimum Variance Configuration
 The absolute minimum variance floor (`K_ABS_MIN_VAR`) SHALL be configurable via Kconfig as a scaled integer (`MONITOR_ABS_MIN_VAR_X10000`).
@@ -75,4 +45,3 @@ The absolute minimum variance floor (`K_ABS_MIN_VAR`) SHALL be configurable via 
 - **WHEN** the monitor initializes
 - **THEN** the absolute minimum variance floor is computed as `MONITOR_ABS_MIN_VAR_X10000 / 10000.0f`
 - **THEN** this value is used in all state transition threshold comparisons
-
