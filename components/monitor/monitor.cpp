@@ -232,6 +232,14 @@ bool Monitor::Update(float dt_s) noexcept {
         }
     }
 
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+    esp_event_post(MONITOR_EVENT_BASE,
+                   MONITOR_EVENT_STREAM_SAMPLE,
+                   &sample,
+                   sizeof(sample),
+                   0);
+#endif
+
     CheckFailureEvents();
 
     if ((sample_count_ >= kStorageSamples) && (write_index_ == 0U)) {
@@ -349,11 +357,9 @@ void Monitor::PushSample(float roll, float pitch, float ax, float ay, float az) 
     // 3. FSM State Transitions
     const float abs_min_var = static_cast<float>(CONFIG_MONITOR_ABS_MIN_ACCEL_VAR_X1000000) / 1000000.0f;
     const float k_high = static_cast<float>(CONFIG_MONITOR_K_HIGH_X100) / 100.0f;
-    const float k_mid = static_cast<float>(CONFIG_MONITOR_K_MID_X100) / 100.0f;
     const float k_low = static_cast<float>(CONFIG_MONITOR_K_LOW_X100) / 100.0f;
 
     const float threshold_high = std::max(accel_err_baseline_var_ * k_high, abs_min_var);
-    const float threshold_mid = std::max(accel_err_baseline_var_ * k_mid, abs_min_var);
     const float threshold_low = std::max(accel_err_baseline_var_ * k_low, abs_min_var);
 
     if (state_ == NodeState::IDLE) {
@@ -381,7 +387,7 @@ void Monitor::PushSample(float roll, float pitch, float ax, float ay, float az) 
                 write_index_ = count;
                 sample_count_ = count;
                 
-                free_decay_debounce_counter_ = 0U;
+                disturbed_exit_debounce_counter_ = 0U;
                 
                 ESP_LOGI(kTag, "Transition: IDLE -> DISTURBED (accel_err_var=%.6f > th=%.6f)",
                          accel_err_var, threshold_high);
@@ -396,30 +402,23 @@ void Monitor::PushSample(float roll, float pitch, float ax, float ay, float az) 
         }
 
         bool transitioned = false;
-        if (accel_err_var < threshold_mid) {
-            ++free_decay_debounce_counter_;
-            if (free_decay_debounce_counter_ >= static_cast<std::size_t>(CONFIG_MONITOR_FREE_DECAY_DEBOUNCE)) {
-                state_ = NodeState::FREE_DECAY;
-                free_decay_entry_time_us_ = static_cast<std::uint64_t>(esp_timer_get_time());
-                
-                // Record physical start of decay (last kShortBufferSamples samples are the pre-roll)
-                decay_start_index_ = (write_index_ + kStorageSamples - kShortBufferSamples) % kStorageSamples;
-                decay_sample_count_ = kShortBufferSamples;
-                
+        if (accel_err_var < threshold_low) {
+            ++disturbed_exit_debounce_counter_;
+            if (disturbed_exit_debounce_counter_ >= static_cast<std::size_t>(CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE)) {
+                state_ = NodeState::IDLE;
                 transitioned = true;
                 
-                ESP_LOGI(kTag, "Transition: DISTURBED -> FREE_DECAY (accel_err_var=%.6f < th=%.6f)",
-                         accel_err_var, threshold_mid);
+                ESP_LOGI(kTag, "Transition: DISTURBED -> IDLE (accel_err_var=%.6f < th=%.6f)",
+                         accel_err_var, threshold_low);
                 
-                // Publish sway stats accumulated so far
-                ComputeAndPublish(NodeState::DISTURBED);
+                static_cast<void>(ComputeAndPublish(NodeState::DISTURBED, true));
             }
         } else {
-            free_decay_debounce_counter_ = 0U;
+            disturbed_exit_debounce_counter_ = 0U;
         }
 
         if (!transitioned && sample_count_ >= (kStorageSamples - static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD))) {
-            ComputeAndPublish(NodeState::DISTURBED);
+            static_cast<void>(ComputeAndPublish(NodeState::DISTURBED, false));
             ESP_LOGI(kTag, "DISTURBED Buffer Refreshed");
             
             write_index_ = 0U;
@@ -434,45 +433,10 @@ void Monitor::PushSample(float roll, float pitch, float ax, float ay, float az) 
             write_index_ = count;
             sample_count_ = count;
         }
-    } else if (state_ == NodeState::FREE_DECAY) {
-        roll_history_[write_index_] = roll;
-        pitch_history_[write_index_] = pitch;
-        write_index_ = (write_index_ + 1U) % kStorageSamples;
-        if (sample_count_ < kStorageSamples) {
-            ++sample_count_;
-        }
-        ++decay_sample_count_;
-
-        if (accel_err_var > threshold_high) {
-            // Re-excitation!
-            state_ = NodeState::DISTURBED;
-            decay_start_index_ = 0U;
-            decay_sample_count_ = 0U;
-            free_decay_debounce_counter_ = 0U;
-            
-            ESP_LOGI(kTag, "Transition: FREE_DECAY -> DISTURBED (re-excitation, accel_err_var=%.6f > th=%.6f)",
-                     accel_err_var, threshold_high);
-        } else if (accel_err_var < threshold_low) {
-            // Decay complete!
-            state_ = NodeState::IDLE;
-            ESP_LOGI(kTag, "Transition: FREE_DECAY -> IDLE (decay complete, accel_err_var=%.6f < th=%.6f)",
-                     accel_err_var, threshold_low);
-            
-            ComputeAndPublish(NodeState::FREE_DECAY);
-        } else {
-            // Check timeout
-            const std::uint64_t elapsed_s = (static_cast<std::uint64_t>(esp_timer_get_time()) - free_decay_entry_time_us_) / 1000000ULL;
-            if (elapsed_s >= static_cast<std::uint64_t>(CONFIG_MONITOR_FREE_DECAY_TIMEOUT_S)) {
-                state_ = NodeState::IDLE;
-                ESP_LOGI(kTag, "Transition: FREE_DECAY -> IDLE (timeout %u s reached)", CONFIG_MONITOR_FREE_DECAY_TIMEOUT_S);
-                
-                ComputeAndPublish(NodeState::FREE_DECAY);
-            }
-        }
     }
 }
 
-bool Monitor::ComputeAndPublish(NodeState pub_state) noexcept {
+bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
     if (!fft_initialized_) {
         return false;
     }
@@ -486,14 +450,24 @@ bool Monitor::ComputeAndPublish(NodeState pub_state) noexcept {
 
     if (pub_state == NodeState::DISTURBED) {
         static_cast<void>(ComputeSwayAndDamping(result));
-        result.natural_freq_roll_hz = 0.0f;
-        result.natural_freq_pitch_hz = 0.0f;
-        result.natural_freq_hz = 0.0f;
-        result.roll_damping_ratio = 0.0f;
-        result.pitch_damping_ratio = 0.0f;
-    } else if (pub_state == NodeState::FREE_DECAY) {
-        static_cast<void>(ComputeNaturalFrequency(result));
-        static_cast<void>(ComputeSwayAndDamping(result));
+        if (is_exit) {
+            PeakList roll_peaks, pitch_peaks;
+            DecayRegion roll_decay = FindDecayRegion(roll_history_, roll_peaks);
+            DecayRegion pitch_decay = FindDecayRegion(pitch_history_, pitch_peaks);
+            
+            result.natural_freq_roll_hz = ComputeAxisNaturalFrequency(roll_history_, roll_decay.start_index, roll_decay.count);
+            result.natural_freq_pitch_hz = ComputeAxisNaturalFrequency(pitch_history_, pitch_decay.start_index, pitch_decay.count);
+            result.natural_freq_hz = std::max(result.natural_freq_roll_hz, result.natural_freq_pitch_hz);
+            
+            result.roll_damping_ratio = ComputeDampingRegression(roll_peaks, result.natural_freq_roll_hz);
+            result.pitch_damping_ratio = ComputeDampingRegression(pitch_peaks, result.natural_freq_pitch_hz);
+        } else {
+            result.natural_freq_roll_hz = 0.0f;
+            result.natural_freq_pitch_hz = 0.0f;
+            result.natural_freq_hz = 0.0f;
+            result.roll_damping_ratio = 0.0f;
+            result.pitch_damping_ratio = 0.0f;
+        }
     }
 
     ESP_LOGD(kTag,
@@ -563,22 +537,131 @@ bool Monitor::ComputeStats(MonitorResult& result) const noexcept {
     return true;
 }
 
-bool Monitor::ComputeNaturalFrequency(MonitorResult& result) noexcept {
-    if (decay_sample_count_ == 0U) {
-        result.natural_freq_roll_hz = 0.0f;
-        result.natural_freq_pitch_hz = 0.0f;
-        result.natural_freq_hz = 0.0f;
-        psd_accum_.fill(0.0f);
-        return false;
+
+Monitor::DecayRegion Monitor::FindDecayRegion(const std::array<float, kStorageSamples>& data, PeakList& out_peaks) const noexcept {
+    DecayRegion region{};
+    out_peaks.count = 0U;
+
+    const std::size_t count = BufferSize();
+    if (count < 3U) {
+        return region;
     }
 
-    psd_accum_.fill(0.0f);
+    const float min_amp = config_.peak_min_amplitude_deg;
+    const std::size_t min_spacing = config_.peak_min_spacing;
 
-    result.natural_freq_roll_hz = ComputeAxisNaturalFrequency(roll_history_, decay_start_index_, decay_sample_count_);
-    result.natural_freq_pitch_hz = ComputeAxisNaturalFrequency(pitch_history_, decay_start_index_, decay_sample_count_);
-    result.natural_freq_hz = std::max(result.natural_freq_roll_hz, result.natural_freq_pitch_hz);
+    // 1. Detect all peaks in the buffer and find the global maximum
+    PeakList all_peaks{};
+    float max_abs = 0.0f;
+    std::size_t max_idx = 0U;
+    bool has_max = false;
 
-    return true;
+    std::size_t last_ext_idx = 0U;
+    bool has_last_ext = false;
+
+    for (std::size_t i = 1U; i + 1U < count; ++i) {
+        const std::size_t idx_prev = PhysicalIndex(i - 1U);
+        const std::size_t idx_curr = PhysicalIndex(i);
+        const std::size_t idx_next = PhysicalIndex(i + 1U);
+
+        const float prev = data[idx_prev];
+        const float curr = data[idx_curr];
+        const float next = data[idx_next];
+
+        const float abs_val = std::fabs(curr);
+
+        const bool is_peak = (curr > prev) && (curr > next) && (abs_val >= min_amp);
+        const bool is_trough = (curr < prev) && (curr < next) && (abs_val >= min_amp);
+
+        if (!(is_peak || is_trough)) {
+            continue;
+        }
+
+        if (has_last_ext && ((i - last_ext_idx) < min_spacing)) {
+            continue;
+        }
+
+        if (all_peaks.count < PeakList::kMaxPeaks) {
+            all_peaks.amplitudes[all_peaks.count] = abs_val;
+            all_peaks.times[all_peaks.count] = static_cast<float>(i) / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+            all_peaks.count++;
+        }
+
+        if (!has_max || abs_val > max_abs) {
+            max_abs = abs_val;
+            max_idx = all_peaks.count - 1U;
+            has_max = true;
+        }
+
+        last_ext_idx = i;
+        has_last_ext = true;
+    }
+
+    if (!has_max || all_peaks.count == 0U) {
+        return region;
+    }
+
+    // 2. Track declining envelope from max_idx forward
+    std::size_t start_logical = static_cast<std::size_t>(all_peaks.times[max_idx] * static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ));
+    region.start_index = PhysicalIndex(start_logical);
+    region.count = count - start_logical;
+
+    float last_amp = all_peaks.amplitudes[max_idx];
+    out_peaks.amplitudes[out_peaks.count] = last_amp;
+    out_peaks.times[out_peaks.count] = all_peaks.times[max_idx];
+    out_peaks.count++;
+
+    for (std::size_t i = max_idx + 1U; i < all_peaks.count; ++i) {
+        const float amp = all_peaks.amplitudes[i];
+        if (amp > last_amp) {
+            break;
+        }
+        out_peaks.amplitudes[out_peaks.count] = amp;
+        out_peaks.times[out_peaks.count] = all_peaks.times[i];
+        out_peaks.count++;
+        last_amp = amp;
+    }
+
+    return region;
+}
+
+float Monitor::ComputeDampingRegression(const PeakList& peaks, float natural_freq_hz) const noexcept {
+    if (peaks.count < 4U || natural_freq_hz <= 0.0f) {
+        return 0.0f;
+    }
+
+    const float wn = kTwoPi * natural_freq_hz;
+    const std::size_t n = peaks.count;
+
+    float sum_t = 0.0f;
+    float sum_y = 0.0f;
+    float sum_ty = 0.0f;
+    float sum_t2 = 0.0f;
+
+    for (std::size_t i = 0U; i < n; ++i) {
+        const float t = peaks.times[i];
+        const float y = std::log(peaks.amplitudes[i]);
+
+        sum_t += t;
+        sum_y += y;
+        sum_ty += t * y;
+        sum_t2 += t * t;
+    }
+
+    const float fn = static_cast<float>(n);
+    const float denominator = (fn * sum_t2) - (sum_t * sum_t);
+
+    if (denominator <= 0.0f) {
+        return 0.0f;
+    }
+
+    const float slope = ((fn * sum_ty) - (sum_t * sum_y)) / denominator;
+
+    if (slope >= 0.0f) {
+        return 0.0f;
+    }
+
+    return std::fabs(slope) / wn;
 }
 
 float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSamples>& history, std::size_t start_phys_idx, std::size_t count) noexcept {
@@ -781,121 +864,6 @@ bool Monitor::ComputeSwayAndDamping(MonitorResult& result) noexcept {
 
         compute_sway_axis(roll_history_, result.roll_sway_pp_max, result.roll_sway_pp_mean);
         compute_sway_axis(pitch_history_, result.pitch_sway_pp_max, result.pitch_sway_pp_mean);
-    }
-
-    // 2. Damping ratios (computed ONLY on the decay portion)
-    if (decay_sample_count_ < 3U) {
-        result.roll_damping_ratio = 0.0f;
-        result.pitch_damping_ratio = 0.0f;
-    } else {
-        auto compute_damping_axis = [&](const std::array<float, kStorageSamples>& data,
-                                        float& damping_ratio) {
-            const float min_amp = config_.peak_min_amplitude_deg;
-            const std::size_t min_spacing = config_.peak_min_spacing;
-
-            float max_abs = 0.0f;
-            std::size_t max_idx = 0U;
-            bool has_max = false;
-            std::size_t last_idx = 0U;
-            bool has_last = false;
-
-            // First pass: find peak with maximum amplitude in the decay window to start decay analysis
-            for (std::size_t i = 1U; i + 1U < decay_sample_count_; ++i) {
-                const std::size_t idx_prev = (decay_start_index_ + i - 1U) % kStorageSamples;
-                const std::size_t idx_curr = (decay_start_index_ + i) % kStorageSamples;
-                const std::size_t idx_next = (decay_start_index_ + i + 1U) % kStorageSamples;
-
-                const float prev = data[idx_prev];
-                const float curr = data[idx_curr];
-                const float next = data[idx_next];
-
-                const bool is_peak = (curr > prev) && (curr > next) && (std::fabs(curr) >= min_amp);
-                const bool is_trough = (curr < prev) && (curr < next) && (std::fabs(curr) >= min_amp);
-
-                if (!(is_peak || is_trough)) {
-                    continue;
-                }
-
-                if (has_last && ((i - last_idx) < min_spacing)) {
-                    continue;
-                }
-
-                const float abs_val = std::fabs(curr);
-                if (!has_max || abs_val > max_abs) {
-                    max_abs = abs_val;
-                    max_idx = i;
-                    has_max = true;
-                }
-
-                last_idx = i;
-                has_last = true;
-            }
-
-            if (!has_max) {
-                damping_ratio = 0.0f;
-                return;
-            }
-
-            // Second pass: compute log decrement over kDecaySpan peaks starting from max_idx
-            constexpr std::size_t kDecaySpan = 3U;
-            std::size_t found = 0U;
-            float x1 = 0.0f;
-            float x2 = 0.0f;
-            last_idx = 0U;
-            has_last = false;
-
-            for (std::size_t i = 1U; i + 1U < decay_sample_count_; ++i) {
-                const std::size_t idx_prev = (decay_start_index_ + i - 1U) % kStorageSamples;
-                const std::size_t idx_curr = (decay_start_index_ + i) % kStorageSamples;
-                const std::size_t idx_next = (decay_start_index_ + i + 1U) % kStorageSamples;
-
-                const float prev = data[idx_prev];
-                const float curr = data[idx_curr];
-                const float next = data[idx_next];
-
-                const bool is_peak = (curr > prev) && (curr > next) && (std::fabs(curr) >= min_amp);
-                const bool is_trough = (curr < prev) && (curr < next) && (std::fabs(curr) >= min_amp);
-
-                if (!(is_peak || is_trough)) {
-                    continue;
-                }
-
-                if (has_last && ((i - last_idx) < min_spacing)) {
-                    continue;
-                }
-
-                last_idx = i;
-                has_last = true;
-
-                if (i < max_idx) {
-                    continue;
-                }
-
-                if (found == 0U && i == max_idx) {
-                    x1 = std::fabs(curr);
-                    found = 1U;
-                    continue;
-                }
-
-                if (found > 0U && found <= kDecaySpan) {
-                    ++found;
-                    if (found == (kDecaySpan + 1U)) {
-                        x2 = std::fabs(curr);
-                        break;
-                    }
-                }
-            }
-
-            if (found == (kDecaySpan + 1U) && x2 > 0.0f && x1 > x2) {
-                const float delta = std::log(x1 / x2) / static_cast<float>(kDecaySpan);
-                damping_ratio = delta / std::sqrt((4.0f * kPi * kPi) + (delta * delta));
-            } else {
-                damping_ratio = 0.0f;
-            }
-        };
-
-        compute_damping_axis(roll_history_, result.roll_damping_ratio);
-        compute_damping_axis(pitch_history_, result.pitch_damping_ratio);
     }
 
     return true;

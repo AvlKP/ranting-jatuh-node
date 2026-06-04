@@ -34,13 +34,15 @@ public:
 private:
     enum class EventType : std::uint8_t {
         Parameters = 0U,
-        Failure = 1U
+        Failure = 1U,
+        StreamSample = 2U
     };
 
     struct Event {
         EventType type{EventType::Parameters};
         monitor::MonitorResult monitor{};
         monitor::FailureResult failure{};
+        monitor::StreamSample stream_sample{};
     };
 
     static constexpr std::size_t kQueueDepth = 16U;

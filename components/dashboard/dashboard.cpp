@@ -310,6 +310,18 @@ const char* kIndexHtml = R"raw(<!DOCTYPE html>
             <div class="status-badge" id="node-state-badge" style="border-color: var(--success); color: var(--success);">
                 State: <span id="node-state-val">IDLE</span>
             </div>
+            <div class="status-badge" id="freq-roll-badge">
+                f_n Roll: <span id="freq-roll-val">-</span> Hz
+            </div>
+            <div class="status-badge" id="freq-pitch-badge">
+                f_n Pitch: <span id="freq-pitch-val">-</span> Hz
+            </div>
+            <div class="status-badge" id="damping-roll-badge">
+                &zeta; Roll: <span id="damping-roll-val">-</span>
+            </div>
+            <div class="status-badge" id="damping-pitch-badge">
+                &zeta; Pitch: <span id="damping-pitch-val">-</span>
+            </div>
         </div>
     </header>
 
@@ -481,13 +493,16 @@ const char* kIndexHtml = R"raw(<!DOCTYPE html>
                 if (data.node_state === 'DISTURBED') {
                     stateBadge.style.borderColor = 'var(--danger)';
                     stateBadge.style.color = 'var(--danger)';
-                } else if (data.node_state === 'FREE_DECAY') {
-                    stateBadge.style.borderColor = 'var(--warning)';
-                    stateBadge.style.color = 'var(--warning)';
                 } else {
                     stateBadge.style.borderColor = 'var(--success)';
                     stateBadge.style.color = 'var(--success)';
                 }
+
+                // Update natural frequency and damping ratio badges
+                document.getElementById('freq-roll-val').textContent = data.natural_freq_roll_hz > 0 ? data.natural_freq_roll_hz.toFixed(2) : '-';
+                document.getElementById('freq-pitch-val').textContent = data.natural_freq_pitch_hz > 0 ? data.natural_freq_pitch_hz.toFixed(2) : '-';
+                document.getElementById('damping-roll-val').textContent = data.roll_damping_ratio > 0 ? data.roll_damping_ratio.toFixed(4) : '-';
+                document.getElementById('damping-pitch-val').textContent = data.pitch_damping_ratio > 0 ? data.pitch_damping_ratio.toFixed(4) : '-';
 
                 // Update Sensor Table
                 const streamBody = document.getElementById('stream-body');
@@ -651,6 +666,15 @@ esp_err_t Dashboard::Start(const Config& config) noexcept {
     };
     httpd_register_uri_handler(server_, &download_uri);
 
+    esp_err_t event_err = esp_event_handler_register(
+        monitor::MONITOR_EVENT_BASE,
+        monitor::MONITOR_EVENT_RESULT,
+        &Dashboard::EventHandler,
+        this);
+    if (event_err != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to register MONITOR_EVENT_RESULT handler: %s", esp_err_to_name(event_err));
+    }
+
     return ESP_OK;
 }
 
@@ -659,6 +683,11 @@ void Dashboard::Stop() noexcept {
         ESP_LOGI(kTag, "Stopping HTTP Server");
         httpd_stop(server_);
         server_ = nullptr;
+        
+        esp_event_handler_unregister(
+            monitor::MONITOR_EVENT_BASE,
+            monitor::MONITOR_EVENT_RESULT,
+            &Dashboard::EventHandler);
     }
 }
 
@@ -689,17 +718,33 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
     const char* state_str = "IDLE";
     if (g_self->monitor_.GetState() == monitor::NodeState::DISTURBED) {
         state_str = "DISTURBED";
-    } else if (g_self->monitor_.GetState() == monitor::NodeState::FREE_DECAY) {
-        state_str = "FREE_DECAY";
     }
+    float freq_roll = 0.0f;
+    float freq_pitch = 0.0f;
+    float damp_roll = 0.0f;
+    float damp_pitch = 0.0f;
+    {
+        std::lock_guard<std::mutex> lock(g_self->mutex_);
+        freq_roll = g_self->latest_result_.natural_freq_roll_hz;
+        freq_pitch = g_self->latest_result_.natural_freq_pitch_hz;
+        damp_roll = g_self->latest_result_.roll_damping_ratio;
+        damp_pitch = g_self->latest_result_.pitch_damping_ratio;
+    }
+
     char chunk_buf[384];
     int len = std::snprintf(chunk_buf, sizeof(chunk_buf),
-                            "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,\"node_state\":\"%s\",",
+                            "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,\"node_state\":\"%s\","
+                            "\"natural_freq_roll_hz\":%.3f,\"natural_freq_pitch_hz\":%.3f,"
+                            "\"roll_damping_ratio\":%.4f,\"pitch_damping_ratio\":%.4f,",
                             wifi_connected ? "true" : "false",
                             g_self->logger_.HasMonitorResult() ? "true" : "false", // Use logger state as MQTT proxy
                             static_cast<unsigned long>(esp_get_free_heap_size()),
                             CONFIG_MONITOR_IMU_RATE_HZ,
-                            state_str);
+                            state_str,
+                            freq_roll,
+                            freq_pitch,
+                            damp_roll,
+                            damp_pitch);
     httpd_resp_send_chunk(req, chunk_buf, len);
 
     // Latest Sensor Stream Table (20 samples)
@@ -921,6 +966,21 @@ esp_err_t Dashboard::DownloadHandler(httpd_req_t* req) noexcept {
     httpd_resp_send_chunk(req, nullptr, 0);
 
     return err;
+}
+
+void Dashboard::EventHandler(void* handler_args,
+                             esp_event_base_t base,
+                             std::int32_t id,
+                             void* event_data) noexcept {
+    auto* self = static_cast<Dashboard*>(handler_args);
+    if (self == nullptr || event_data == nullptr) {
+        return;
+    }
+
+    if (id == monitor::MONITOR_EVENT_RESULT) {
+        std::lock_guard<std::mutex> lock(self->mutex_);
+        self->latest_result_ = *static_cast<const monitor::MonitorResult*>(event_data);
+    }
 }
 
 } // namespace dashboard

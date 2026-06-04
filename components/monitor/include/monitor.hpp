@@ -35,14 +35,13 @@ struct MonitorConfig {
     std::int32_t ae_gpio_pin{-1};
     std::int32_t ae_adc_channel{-1};
     int ae_adc_threshold{CONFIG_MONITOR_AE_ADC_THRESHOLD};
-    float peak_min_amplitude_deg{static_cast<float>(CONFIG_MONITOR_PEAK_MIN_AMPLITUDE)};
+    float peak_min_amplitude_deg{static_cast<float>(CONFIG_MONITOR_PEAK_MIN_AMPLITUDE_X10) / 10.0f};
     std::size_t peak_min_spacing{static_cast<std::size_t>(CONFIG_MONITOR_PEAK_MIN_SPACING_SAMPLES)};
 };
 
 enum class NodeState : std::uint8_t {
     IDLE = 0,
-    DISTURBED = 1,
-    FREE_DECAY = 2
+    DISTURBED = 1
 };
 
 struct MonitorResult {
@@ -99,11 +98,25 @@ private:
     [[nodiscard]] bool ReadImu(sensor::lsm6ds3::Value& gyro,
                                sensor::lsm6ds3::Value& accel) noexcept;
     void PushSample(float roll, float pitch, float ax, float ay, float az) noexcept;
-    [[nodiscard]] bool ComputeAndPublish(NodeState pub_state) noexcept;
+    [[nodiscard]] bool ComputeAndPublish(NodeState pub_state, bool is_exit = true) noexcept;
     [[nodiscard]] bool ComputeStats(MonitorResult& result) const noexcept;
     [[nodiscard]] bool ComputeNaturalFrequency(MonitorResult& result) noexcept;
     [[nodiscard]] float ComputeAxisNaturalFrequency(const std::array<float, kStorageSamples>& history, std::size_t start_phys_idx, std::size_t count) noexcept;
     [[nodiscard]] bool ComputeSwayAndDamping(MonitorResult& result) noexcept;
+    
+    struct DecayRegion {
+        std::size_t start_index{0U};
+        std::size_t count{0U};
+    };
+    struct PeakList {
+        static constexpr std::size_t kMaxPeaks = 256U;
+        std::array<float, kMaxPeaks> amplitudes{};
+        std::array<float, kMaxPeaks> times{};
+        std::size_t count{0U};
+    };
+    [[nodiscard]] DecayRegion FindDecayRegion(const std::array<float, kStorageSamples>& data, PeakList& out_peaks) const noexcept;
+    [[nodiscard]] float ComputeDampingRegression(const PeakList& peaks, float natural_freq_hz) const noexcept;
+
     void CheckFailureEvents() noexcept;
     void PublishFailure(FailureEvent event) noexcept;
     static void AeGpioIsr(void* arg) noexcept;
@@ -146,10 +159,8 @@ private:
     float baseline_accum_sq_sum_{0.0f};
     std::size_t baseline_sample_count_{0U};
 
-    std::size_t decay_start_index_{0U};
-    std::size_t decay_sample_count_{0U};
-    std::size_t free_decay_debounce_counter_{0U};
-    std::uint64_t free_decay_entry_time_us_{0ULL};
+    std::size_t disturbed_exit_debounce_counter_{0U};
+
 
     NodeState state_{NodeState::IDLE};
     float idle_5min_roll_var_{0.0f};

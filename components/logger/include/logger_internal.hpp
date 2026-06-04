@@ -34,6 +34,8 @@ namespace storage {
 void SetMountPoint(const char* mount_point) noexcept;
 [[nodiscard]] bool AppendParameter(const TimeInfo& time_info, const CsvLine& line) noexcept;
 [[nodiscard]] bool AppendFailure(const TimeInfo& time_info, const CsvLine& line) noexcept;
+[[nodiscard]] bool ResetDebugLog() noexcept;
+[[nodiscard]] bool AppendDebugLog(const CsvLine& line) noexcept;
 } // namespace storage
 
 namespace mqtt {

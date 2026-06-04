@@ -16,7 +16,7 @@ static const char* kTag = "LOGGER_STORAGE";
 const char* ParameterHeader() {
     return "timestamp_unix,timestamp_us,roll_mean,pitch_mean,roll_var,pitch_var,"
            "roll_pp_max,roll_pp_mean,pitch_pp_max,pitch_pp_mean,roll_zeta,pitch_zeta,"
-           "natural_freq_hz,sample_count\n";
+           "natural_freq_hz,natural_freq_roll_hz,natural_freq_pitch_hz,state,sample_count\n";
 }
 
 const char* FailureHeader() {
@@ -84,6 +84,18 @@ bool BuildFailurePath(char* path, std::size_t path_len) {
     return len > 0 && static_cast<std::size_t>(len) < path_len;
 }
 
+bool BuildDebugLogPath(char* path, std::size_t path_len) {
+    if (path == nullptr || path_len == 0U) {
+        return false;
+    }
+
+    const int len = std::snprintf(path,
+                                  path_len,
+                                  "%s/debug.csv",
+                                  s_mount_point);
+    return len > 0 && static_cast<std::size_t>(len) < path_len;
+}
+
 bool AppendLine(const char* path, const CsvLine& line) {
     FILE* file = std::fopen(path, "a");
     if (file == nullptr) {
@@ -142,6 +154,47 @@ bool AppendFailure(const TimeInfo& time_info, const CsvLine& line) noexcept {
         return false;
     }
     return AppendLine(path, line);
+}
+
+bool ResetDebugLog() noexcept {
+#if CONFIG_APP_DEBUG_CSV_LOGS
+    if (s_mount_point == nullptr || std::strlen(s_mount_point) == 0U) {
+        return false;
+    }
+    char path[kPathMax]{};
+    if (!BuildDebugLogPath(path, sizeof(path))) {
+        return false;
+    }
+    FILE* file = std::fopen(path, "w");
+    if (file == nullptr) {
+        ESP_LOGE(kTag, "Open debug log for write failed: %s errno=%d (%s)",
+                 path, errno, std::strerror(errno));
+        return false;
+    }
+    const char* header = "timestamp_ms,accel_x,accel_y,accel_z,tilt_x,tilt_y,tilt_z\n";
+    const std::size_t header_len = std::strlen(header);
+    const std::size_t written = std::fwrite(header, 1U, header_len, file);
+    std::fclose(file);
+    return written == header_len;
+#else
+    return true;
+#endif
+}
+
+bool AppendDebugLog(const CsvLine& line) noexcept {
+#if CONFIG_APP_DEBUG_CSV_LOGS
+    if (s_mount_point == nullptr || std::strlen(s_mount_point) == 0U) {
+        return false;
+    }
+    char path[kPathMax]{};
+    if (!BuildDebugLogPath(path, sizeof(path))) {
+        return false;
+    }
+    return AppendLine(path, line);
+#else
+    static_cast<void>(line);
+    return true;
+#endif
 }
 
 } // namespace logger::storage

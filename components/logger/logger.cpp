@@ -109,8 +109,44 @@ bool FormatParameterCsv(const monitor::MonitorResult& result,
     const char* state_str = "IDLE";
     if (result.state == monitor::NodeState::DISTURBED) {
         state_str = "DISTURBED";
-    } else if (result.state == monitor::NodeState::FREE_DECAY) {
-        state_str = "FREE_DECAY";
+    }
+
+    const int len = std::snprintf(line.buffer.data(),
+                                  line.buffer.size(),
+                                  "%lld,%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.3f,%.3f,%.3f,%s,%u\n",
+                                  static_cast<long long>(unix_time),
+                                  static_cast<unsigned long long>(time_info.timestamp_us),
+                                  result.roll_mean,
+                                  result.pitch_mean,
+                                  result.roll_variance,
+                                  result.pitch_variance,
+                                  result.roll_sway_pp_max,
+                                  result.roll_sway_pp_mean,
+                                  result.pitch_sway_pp_max,
+                                  result.pitch_sway_pp_mean,
+                                  result.roll_damping_ratio,
+                                  result.pitch_damping_ratio,
+                                  result.natural_freq_hz,
+                                  result.natural_freq_roll_hz,
+                                  result.natural_freq_pitch_hz,
+                                  state_str,
+                                  static_cast<unsigned>(result.sample_count));
+    if (len <= 0 || static_cast<std::size_t>(len) >= line.buffer.size()) {
+        return false;
+    }
+
+    line.length = static_cast<std::uint16_t>(len);
+    return true;
+}
+
+bool FormatParameterJson(const monitor::MonitorResult& result,
+                         const TimeInfo& time_info,
+                         CsvLine& line) noexcept {
+    const std::int64_t unix_time = time_info.valid ? time_info.unix_time : 0;
+    
+    const char* state_str = "IDLE";
+    if (result.state == monitor::NodeState::DISTURBED) {
+        state_str = "DISTURBED";
     }
 
     const int len = std::snprintf(line.buffer.data(),
@@ -177,6 +213,10 @@ bool Logger::Init(const Config& config) noexcept {
     sd_mount_point_ = config.sd_mount_point;
     storage::SetMountPoint(sd_mount_point_);
 
+    if (!storage::ResetDebugLog()) {
+        ESP_LOGE(kTag, "Failed to reset debug log");
+    }
+
     if (!mqtt::Init()) {
         ESP_LOGE(kTag, "MQTT init failed");
     }
@@ -207,6 +247,18 @@ bool Logger::Init(const Config& config) noexcept {
         return false;
     }
 
+#if CONFIG_APP_DEBUG_CSV_LOGS
+    err = esp_event_handler_register(
+        monitor::MONITOR_EVENT_BASE,
+        monitor::MONITOR_EVENT_STREAM_SAMPLE,
+        &Logger::EventHandler,
+        this);
+    if (err != ESP_OK) {
+        ESP_LOGE(kTag, "Failed to register MONITOR_EVENT_STREAM_SAMPLE handler: %s", esp_err_to_name(err));
+        return false;
+    }
+#endif
+
     const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
     next_publish_us_ = now_us + kPublishPeriodUs;
     return true;
@@ -229,6 +281,9 @@ void Logger::EventHandler(void* handler_args,
     } else if (id == monitor::MONITOR_EVENT_FAILURE) {
         event.type = EventType::Failure;
         event.failure = *static_cast<const monitor::FailureResult*>(event_data);
+    } else if (id == monitor::MONITOR_EVENT_STREAM_SAMPLE) {
+        event.type = EventType::StreamSample;
+        event.stream_sample = *static_cast<const monitor::StreamSample*>(event_data);
     } else {
         return;
     }
@@ -270,19 +325,37 @@ void Logger::TaskLoop() noexcept {
                 time_info.timestamp_us = event.monitor.timestamp_us;
                 static_cast<void>(BuildTimeInfo(time_info));
 
-                CsvLine line{};
-                if (!FormatParameterCsv(event.monitor, time_info, line)) {
-                    ESP_LOGE(kTag, "Format parameter CSV failed");
+                CsvLine line_csv{};
+                CsvLine line_json{};
+                bool csv_ok = FormatParameterCsv(event.monitor, time_info, line_csv);
+                bool json_ok = FormatParameterJson(event.monitor, time_info, line_json);
+                if (!csv_ok || !json_ok) {
+                    ESP_LOGE(kTag, "Format parameter CSV or JSON failed");
                 } else {
-                    if (!storage::AppendParameter(time_info, line)) {
+                    if (!storage::AppendParameter(time_info, line_csv)) {
                         ESP_LOGE(kTag, "Parameter storage write failed");
                     }
 #if CONFIG_LOGGER_SERIAL_OUTPUT
                     ESP_LOGI(kTag, "param_csv=%.*s",
-                             static_cast<int>(line.length),
-                             line.buffer.data());
+                             static_cast<int>(line_csv.length),
+                             line_csv.buffer.data());
 #endif
-                    AppendPendingParameter(line);
+                    AppendPendingParameter(line_json);
+                }
+            } else if (event.type == EventType::StreamSample) {
+                CsvLine line{};
+                const int len = std::snprintf(line.buffer.data(), line.buffer.size(),
+                                              "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                                              static_cast<unsigned long long>(event.stream_sample.timestamp_us / 1000U),
+                                              event.stream_sample.accel_x,
+                                              event.stream_sample.accel_y,
+                                              event.stream_sample.accel_z,
+                                              event.stream_sample.roll,
+                                              event.stream_sample.pitch,
+                                              0.0f);
+                if (len > 0 && static_cast<std::size_t>(len) < line.buffer.size()) {
+                    line.length = static_cast<std::uint16_t>(len);
+                    storage::AppendDebugLog(line);
                 }
             } else {
                 TimeInfo time_info{};

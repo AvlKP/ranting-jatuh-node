@@ -4,7 +4,7 @@
 TBD - created by archiving change adapt-components-new-fsm. Update Purpose after archive.
 ## Requirements
 ### Requirement: Dashboard renders aperiodic data
-The dashboard SHALL correctly display event-driven data from all three FSM states (`IDLE`, `DISTURBED`, `FREE_DECAY`) instead of expecting continuous periodic streams.
+The dashboard SHALL correctly display event-driven data from all three FSM states (`IDLE`, `DISTURBED`, `FREE_DECAY`) instead of expecting continuous periodic streams. The UI SHALL visually indicate the current state.
 
 #### Scenario: Displaying idle periods
 - **WHEN** no new parameter data is received for an extended period
@@ -16,7 +16,7 @@ The dashboard SHALL correctly display event-driven data from all three FSM state
 
 #### Scenario: Displaying FREE_DECAY state
 - **WHEN** new parameter data arrives with `state` field `"FREE_DECAY"`
-- **THEN** the dashboard SHALL indicate the node is in `FREE_DECAY` state
+- **THEN** the dashboard SHALL indicate the node is in `FREE_DECAY` state visually in the UI
 - **THEN** the dashboard SHALL display the natural frequency and damping ratio results
 
 ### Requirement: Dashboard displays per-axis natural frequency

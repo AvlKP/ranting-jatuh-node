@@ -35,16 +35,16 @@ config MONITOR_AE_ADC_THRESHOLD
     help
         Raw ADC threshold for acoustic emission failure.
 
-config MONITOR_PEAK_MIN_AMPLITUDE
-    int "Peak detection min amplitude (deg)"
-    default 2
-    range 0 90
+config MONITOR_PEAK_MIN_AMPLITUDE_X10
+    int "Peak detection min amplitude (deg x10)"
+    default 5
+    range 1 900
     help
-        Minimum peak amplitude in degrees for sway and damping detection.
+        Minimum peak amplitude in degrees (scaled by 10) for sway and damping detection.
 
 config MONITOR_PEAK_MIN_SPACING_SAMPLES
     int "Peak detection min spacing (samples)"
-    default 5
+    default 2
     range 1 500
     help
         Minimum sample spacing between peaks for sway and damping detection.
@@ -132,15 +132,8 @@ config MONITOR_K_HIGH_X100
     help
         Multiplier (scaled by 100) for baseline accel error variance. E.g., 150 means accel_err variance must exceed 1.5x of the baseline.
 
-config MONITOR_K_MID_X100
-    int "DISTURBED to FREE_DECAY accel error threshold multiplier (x100)"
-    default 120
-    range 50 1000
-    help
-        Multiplier (scaled by 100) for baseline accel error variance. E.g., 120 means accel_err variance must drop below 1.2x of the baseline.
-
 config MONITOR_K_LOW_X100
-    int "FREE_DECAY to IDLE accel error threshold multiplier (x100)"
+    int "DISTURBED to IDLE accel error threshold multiplier (x100)"
     default 110
     range 50 1000
     help
@@ -160,19 +153,12 @@ config MONITOR_ABS_MIN_ACCEL_VAR_X1000000
     help
         Absolute minimum accelerometer error variance floor (scaled by 1000000). E.g., 100 means floor is 0.0001 g^2.
 
-config MONITOR_FREE_DECAY_DEBOUNCE
-    int "DISTURBED to FREE_DECAY debounce count (samples)"
-    default 128
+config MONITOR_DISTURBED_EXIT_DEBOUNCE
+    int "DISTURBED to IDLE exit debounce count (samples)"
+    default 64
     range 1 1000
     help
-        Number of consecutive samples below the mid threshold to transition to FREE_DECAY.
-
-config MONITOR_FREE_DECAY_TIMEOUT_S
-    int "FREE_DECAY state timeout (seconds)"
-    default 120
-    range 1 3600
-    help
-        Timeout in seconds for the FREE_DECAY state before returning to IDLE.
+        Number of consecutive samples below the low threshold to transition to IDLE.
 
 endmenu
 
