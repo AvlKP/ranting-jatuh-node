@@ -60,8 +60,9 @@ Key Kconfig options (run `idf.py menuconfig`):
 **WiFi & MQTT (Logger component):**
 - `LOGGER_WIFI_SSID` / `LOGGER_WIFI_PASSWORD` — WiFi credentials (PSK or WPA2-Enterprise PEAP)
 - `LOGGER_MQTT_URI` — broker URI (default `mqtt://broker.hivemq.com`)
-- `LOGGER_MQTT_TOPIC_PARAMETERS` — default `ranting/parameters`
-- `LOGGER_MQTT_TOPIC_FAILURES` — default `ranting/failures`
+- `LOGGER_MQTT_TOPIC_PARAMETERS` — default `ranting/{node_id}/parameters` (runtime-constructed, node ID from `LOGGER_NODE_ID`)
+- `LOGGER_MQTT_TOPIC_FAILURES` — default `ranting/{node_id}/failures`
+- `LOGGER_NODE_ID` — node identifier for topic prefix. Empty = auto-generate random adjective-noun ID (stored in NVS)
 - `LOGGER_NTP_SERVER` — NTP for timestamps (default `pool.ntp.org`)
 
 **Monitoring (Monitor component):**
@@ -105,8 +106,10 @@ Key Kconfig options (run `idf.py menuconfig`):
 
 | Topic | Payload | Description |
 |-------|---------|-------------|
-| `ranting/parameters` | JSON | Periodic monitoring data (tilt, frequency, damping, sway) |
-| `ranting/failures` | Text/CSV | Failure events (free-fall, acoustic emission) |
-| `ranting/verify` | JSON | Startup self-test results (if verification enabled) |
+| `ranting/{node_id}/parameters` | JSON | Periodic monitoring data (tilt, frequency, damping, sway) |
+| `ranting/{node_id}/failures` | Text/CSV | Failure events (free-fall, acoustic emission) |
+| `ranting/{node_id}/verify` | JSON | Startup self-test results (if verification enabled) |
+
+**Server Subscription**: Use MQTT wildcard patterns — `ranting/+/parameters`, `ranting/+/failures`, `ranting/+/verify` — to receive data from all nodes. Extract `{node_id}` from the topic to identify the source.
 
 See `mqtt_interface.md` for full payload schema.

@@ -8,6 +8,7 @@
 
 #include "esp_log.h"
 #include "esp_timer.h"
+#include "logger_internal.hpp"
 
 namespace verify {
 
@@ -78,7 +79,7 @@ bool VerifySdStorage() {
 }
 
 bool VerifyMqtt(logger::Logger& logger) {
-    const char* topic = CONFIG_APP_VERIFY_MQTT_TOPIC;
+    const char* topic = logger::mqtt::GetTopic("verify");
     if (topic == nullptr || std::strlen(topic) == 0U) {
         ESP_LOGE(kVerifyTag, "MQTT verify topic not set");
         return false;

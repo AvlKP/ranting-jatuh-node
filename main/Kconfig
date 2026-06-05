@@ -25,8 +25,12 @@ config APP_VERIFY_ENABLE
     default y
 
 config APP_VERIFY_MQTT_TOPIC
-    string "MQTT verify topic"
-    default "ranting/verify"
+    string "MQTT verify topic suffix"
+    default "verify"
+    help
+        MQTT topic suffix for startup verification publish.
+        The full topic is constructed as ranting/{node_id}/{suffix} at runtime.
+        The {node_id} is resolved from CONFIG_LOGGER_NODE_ID, NVS, or auto-generated.
 
 config APP_VERIFY_MONITOR_TIMEOUT_MS
     int "Monitor verify timeout (ms)"

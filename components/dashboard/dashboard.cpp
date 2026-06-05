@@ -1,5 +1,6 @@
 #include "dashboard.hpp"
 #include "mqtt_log.hpp"
+#include "logger_internal.hpp"
 #include "esp_log.h"
 #include "esp_wifi.h"
 #include "esp_system.h"
@@ -706,7 +707,9 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
 
     // Start JSON streaming using chunked response to conserve RAM
-    httpd_resp_send_chunk(req, "{", 1);
+    httpd_resp_send_chunk(req, "{\"node_id\":\"", 11);
+    httpd_resp_send_chunk(req, logger::mqtt::GetNodeId(), std::strlen(logger::mqtt::GetNodeId()));
+    httpd_resp_send_chunk(req, "\",", 2);
 
     // WiFi & Heap Stats
     bool wifi_connected = false;

@@ -15,6 +15,7 @@
 #include "mqtt_client.h"
 #include "mqtt5_client.h"
 #include "nvs_flash.h"
+#include "nvs.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "sdkconfig.h"
@@ -52,6 +53,43 @@ esp_mqtt5_connection_property_config_t s_connect_property{};
 esp_mqtt5_publish_property_config_t s_publish_property{};
 
 static const char* kTag = "LOGGER_MQTT";
+
+constexpr const char* kTopicBasePrefix = "ranting/";
+constexpr const char* kTopicDelimiter = "/";
+constexpr std::size_t kMaxNodeIdLen = 32U;
+constexpr std::size_t kMaxTopicLen = 128U;
+
+constexpr const char* kTopicSuffixParameters = "parameters";
+constexpr const char* kTopicSuffixFailures = "failures";
+constexpr const char* kTopicSuffixVerify = "verify";
+
+static const char* kAdjectives[] = {
+    "quiet", "bold", "calm", "cool", "crisp", "dawn", "deep", "dry",
+    "dusk", "eager", "fair", "fast", "fierce", "fine", "flat", "fresh",
+    "full", "glad", "gold", "good", "grand", "gray", "great", "green",
+    "happy", "hard", "high", "hot", "keen", "kind", "late", "lean",
+    "light", "long", "loud", "low", "lucky", "mild", "neat", "new",
+    "nice", "noble", "odd", "old", "pale", "pink", "plain", "proud",
+    "pure", "quick", "rare", "raw", "red", "rich", "rough", "royal",
+    "safe", "sharp", "slim", "slow", "small", "smart", "soft", "warm"
+};
+
+static const char* kNouns[] = {
+    "pine", "oak", "ash", "beech", "birch", "cedar", "elm", "fir",
+    "hawk", "fox", "bear", "deer", "dove", "duck", "eagle", "falcon",
+    "finch", "goose", "heron", "jay", "kite", "lark", "loon", "mink",
+    "mole", "newt", "owl", "peak", "pond", "rail", "robin", "seal",
+    "shrew", "skye", "sole", "spruce", "star", "stork", "swan", "teal",
+    "tern", "toad", "trout", "vale", "vole", "wren", "yew", "zinc",
+    "acre", "barn", "bell", "bend", "bloom", "breeze", "brook", "cairn",
+    "cliff", "cloud", "coast", "cove", "creek", "dale", "dell", "fern"
+};
+
+constexpr std::size_t kAdjectiveCount = sizeof(kAdjectives) / sizeof(kAdjectives[0]);
+constexpr std::size_t kNounCount = sizeof(kNouns) / sizeof(kNouns[0]);
+
+static const char* kNvsNamespace = "logger";
+static const char* kNvsKeyNodeId = "node_id";
 
 const char* WifiReasonString(std::uint8_t reason) {
     switch (reason) {
@@ -202,6 +240,70 @@ bool InitNvs() {
 
     s_nvs_initialized = true;
     return true;
+}
+
+bool ReadNodeIdFromNvs(char* out_buf, std::size_t buf_size) noexcept {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READONLY, &handle);
+    if (err != ESP_OK) {
+        return false;
+    }
+    std::size_t len = buf_size;
+    err = nvs_get_str(handle, kNvsKeyNodeId, out_buf, &len);
+    nvs_close(handle);
+    return err == ESP_OK;
+}
+
+bool WriteNodeIdToNvs(const char* node_id) noexcept {
+    nvs_handle_t handle;
+    esp_err_t err = nvs_open(kNvsNamespace, NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        return false;
+    }
+    err = nvs_set_str(handle, kNvsKeyNodeId, node_id);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    return err == ESP_OK;
+}
+
+void GenerateNodeId(char* out_buf, std::size_t buf_size) noexcept {
+    const std::size_t adj_idx = esp_random() % kAdjectiveCount;
+    const std::size_t noun_idx = esp_random() % kNounCount;
+    std::snprintf(out_buf, buf_size, "%s-%s", kAdjectives[adj_idx], kNouns[noun_idx]);
+}
+
+void ResolveNodeId(char* out_buf, std::size_t buf_size) noexcept {
+    if (out_buf == nullptr || buf_size == 0U) {
+        return;
+    }
+
+    const std::size_t kconfig_len = std::strlen(CONFIG_LOGGER_NODE_ID);
+    if (kconfig_len > 0U) {
+        std::strncpy(out_buf, CONFIG_LOGGER_NODE_ID, buf_size);
+        out_buf[buf_size - 1U] = '\0';
+        ESP_LOGI(kTag, "Node ID from Kconfig: %s", out_buf);
+        return;
+    }
+
+    if (!InitNvs()) {
+        ESP_LOGW(kTag, "NVS init failed, generating ephemeral node ID");
+        GenerateNodeId(out_buf, buf_size);
+        return;
+    }
+
+    if (ReadNodeIdFromNvs(out_buf, buf_size)) {
+        ESP_LOGI(kTag, "Node ID from NVS: %s", out_buf);
+        return;
+    }
+
+    GenerateNodeId(out_buf, buf_size);
+    if (WriteNodeIdToNvs(out_buf)) {
+        ESP_LOGI(kTag, "Node ID generated and stored: %s", out_buf);
+    } else {
+        ESP_LOGW(kTag, "Node ID generated but NVS write failed: %s", out_buf);
+    }
 }
 
 bool InitWifiCore() {
@@ -629,6 +731,27 @@ bool StartWifiPersistent() {
 
 } // namespace
 
+static char s_node_id[kMaxNodeIdLen]{};
+static bool s_node_id_resolved = false;
+
+const char* GetNodeId() noexcept {
+    if (!s_node_id_resolved) {
+        ResolveNodeId(s_node_id, sizeof(s_node_id));
+        s_node_id_resolved = true;
+    }
+    return s_node_id;
+}
+
+void BuildTopic(char* buf, std::size_t buf_size, const char* node_id, const char* datatype) noexcept {
+    std::snprintf(buf, buf_size, "%s%s%s%s", kTopicBasePrefix, node_id, kTopicDelimiter, datatype);
+}
+
+const char* GetTopic(const char* datatype) noexcept {
+    static char s_topic_buffer[kMaxTopicLen];
+    BuildTopic(s_topic_buffer, sizeof(s_topic_buffer), GetNodeId(), datatype);
+    return s_topic_buffer;
+}
+
 bool SyncTimeOnce() noexcept {
     if (!ConnectWifi()) {
         return false;
@@ -654,7 +777,7 @@ bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept {
         return true;
     }
 
-    const bool ok = PublishLines(CONFIG_LOGGER_MQTT_TOPIC_PARAMETERS, lines, count, "application/json");
+    const bool ok = PublishLines(GetTopic(kTopicSuffixParameters), lines, count, "application/json");
 #if !CONFIG_DASHBOARD_ENABLE
     esp_wifi_disconnect();
     esp_wifi_stop();
@@ -663,7 +786,7 @@ bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept {
 }
 
 bool PublishFailure(const CsvLine& line) noexcept {
-    const bool ok = PublishLines(CONFIG_LOGGER_MQTT_TOPIC_FAILURES, &line, 1U, "text/csv");
+    const bool ok = PublishLines(GetTopic(kTopicSuffixFailures), &line, 1U, "text/csv");
 #if !CONFIG_DASHBOARD_ENABLE
     esp_wifi_disconnect();
     esp_wifi_stop();

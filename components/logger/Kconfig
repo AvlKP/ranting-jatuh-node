@@ -47,6 +47,14 @@ config LOGGER_NTP_SERVER
     string "NTP server"
     default "pool.ntp.org"
 
+config LOGGER_NODE_ID
+    string "Node ID"
+    default ""
+    help
+        Unique node identifier used as MQTT topic prefix (e.g., ranting/{node_id}/parameters).
+        Leave empty to auto-generate a random adjective-noun ID at first boot (persisted in NVS).
+        Set a non-empty value to override with a known provisioning ID (NVS is skipped).
+
 config LOGGER_MQTT_URI
     string "MQTT broker URI"
     default "mqtt://broker.hivemq.com"
@@ -64,12 +72,19 @@ config LOGGER_MQTT_CLIENT_ID
     default "ranting-logger"
 
 config LOGGER_MQTT_TOPIC_PARAMETERS
-    string "MQTT parameters topic"
-    default "ranting/parameters"
+    string "MQTT parameters topic suffix"
+    default "parameters"
+    help
+        MQTT topic suffix for parameter data. The full topic is constructed
+        at runtime as ranting/{node_id}/{suffix} where {node_id} is resolved
+        from CONFIG_LOGGER_NODE_ID, NVS, or auto-generated.
 
 config LOGGER_MQTT_TOPIC_FAILURES
-    string "MQTT failure topic"
-    default "ranting/failures"
+    string "MQTT failure topic suffix"
+    default "failures"
+    help
+        MQTT topic suffix for failure events. The full topic is constructed
+        at runtime as ranting/{node_id}/{suffix}.
 
 config LOGGER_MQTT_QOS
     int "MQTT QoS"
