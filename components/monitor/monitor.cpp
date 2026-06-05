@@ -222,6 +222,7 @@ bool Monitor::Update(float dt_s) noexcept {
     sample.roll = current_roll;
     sample.pitch = current_pitch;
     sample.timestamp_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    sample.state = state_;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);

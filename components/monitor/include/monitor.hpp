@@ -18,6 +18,11 @@ constexpr std::size_t kStorageSamples =
 constexpr std::size_t kFftWindowSamples = 1024U;
 constexpr std::size_t kFftOverlapSamples = kFftWindowSamples / 2U;
 
+enum class NodeState : std::uint8_t {
+    IDLE = 0,
+    DISTURBED = 1
+};
+
 struct StreamSample {
     float accel_x{0.0f};
     float accel_y{0.0f};
@@ -28,6 +33,7 @@ struct StreamSample {
     float roll{0.0f};
     float pitch{0.0f};
     std::uint64_t timestamp_us{0};
+    NodeState state{NodeState::IDLE};
 };
 
 struct MonitorConfig {
@@ -37,11 +43,6 @@ struct MonitorConfig {
     int ae_adc_threshold{CONFIG_MONITOR_AE_ADC_THRESHOLD};
     float peak_min_amplitude_deg{static_cast<float>(CONFIG_MONITOR_PEAK_MIN_AMPLITUDE_X10) / 10.0f};
     std::size_t peak_min_spacing{static_cast<std::size_t>(CONFIG_MONITOR_PEAK_MIN_SPACING_SAMPLES)};
-};
-
-enum class NodeState : std::uint8_t {
-    IDLE = 0,
-    DISTURBED = 1
 };
 
 struct MonitorResult {

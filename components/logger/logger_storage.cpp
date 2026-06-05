@@ -5,6 +5,8 @@
 #include <cstring>
 
 #include "esp_log.h"
+
+#include "sdkconfig.h"
 namespace logger::storage {
 
 namespace {
@@ -12,6 +14,13 @@ namespace {
 constexpr std::size_t kPathMax = 128U;
 const char* s_mount_point = nullptr;
 static const char* kTag = "LOGGER_STORAGE";
+
+#if CONFIG_APP_DEBUG_CSV_LOGS
+constexpr std::size_t kDebugBufferMax = 64U;
+std::array<CsvLine, kDebugBufferMax> s_debug_buffer{};
+std::size_t s_debug_buffer_head{0U};
+std::size_t s_debug_buffer_count{0U};
+#endif
 
 const char* ParameterHeader() {
     return "timestamp_unix,timestamp_us,roll_mean,pitch_mean,roll_var,pitch_var,"
@@ -171,7 +180,7 @@ bool ResetDebugLog() noexcept {
                  path, errno, std::strerror(errno));
         return false;
     }
-    const char* header = "timestamp_ms,accel_x,accel_y,accel_z,tilt_x,tilt_y,tilt_z\n";
+    const char* header = "timestamp_ms,accel_x,accel_y,accel_z,tilt_x,tilt_y,tilt_z,state\n";
     const std::size_t header_len = std::strlen(header);
     const std::size_t written = std::fwrite(header, 1U, header_len, file);
     std::fclose(file);
@@ -186,13 +195,57 @@ bool AppendDebugLog(const CsvLine& line) noexcept {
     if (s_mount_point == nullptr || std::strlen(s_mount_point) == 0U) {
         return false;
     }
+    if (s_debug_buffer_count >= kDebugBufferMax) {
+        return false;
+    }
+    const std::size_t tail = (s_debug_buffer_head + s_debug_buffer_count) % kDebugBufferMax;
+    s_debug_buffer[tail] = line;
+    ++s_debug_buffer_count;
+    return true;
+#else
+    static_cast<void>(line);
+    return true;
+#endif
+}
+
+bool FlushDebugLog() noexcept {
+#if CONFIG_APP_DEBUG_CSV_LOGS
+    if (s_debug_buffer_count == 0U) {
+        return true;
+    }
+    if (s_mount_point == nullptr || std::strlen(s_mount_point) == 0U) {
+        s_debug_buffer_head = 0U;
+        s_debug_buffer_count = 0U;
+        return false;
+    }
     char path[kPathMax]{};
     if (!BuildDebugLogPath(path, sizeof(path))) {
         return false;
     }
-    return AppendLine(path, line);
+    FILE* file = std::fopen(path, "a");
+    if (file == nullptr) {
+        ESP_LOGE(kTag, "Open debug log for flush failed: %s errno=%d (%s)",
+                 path, errno, std::strerror(errno));
+        return false;
+    }
+    bool success = true;
+    for (std::size_t i = 0U; i < s_debug_buffer_count; ++i) {
+        const std::size_t idx = (s_debug_buffer_head + i) % kDebugBufferMax;
+        const CsvLine& buf_line = s_debug_buffer[idx];
+        const std::size_t written = std::fwrite(buf_line.buffer.data(), 1U, buf_line.length, file);
+        if (written != buf_line.length) {
+            ESP_LOGE(kTag, "Flush write failed: errno=%d (%s)", errno, std::strerror(errno));
+            success = false;
+            break;
+        }
+    }
+    std::fclose(file);
+    if (success) {
+        s_debug_buffer_head = 0U;
+        s_debug_buffer_count = 0U;
+    }
+    return success;
 #else
-    static_cast<void>(line);
     return true;
 #endif
 }

@@ -261,6 +261,7 @@ bool Logger::Init(const Config& config) noexcept {
 
     const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
     next_publish_us_ = now_us + kPublishPeriodUs;
+    last_flush_us_ = now_us;
     return true;
 }
 
@@ -345,17 +346,24 @@ void Logger::TaskLoop() noexcept {
             } else if (event.type == EventType::StreamSample) {
                 CsvLine line{};
                 const int len = std::snprintf(line.buffer.data(), line.buffer.size(),
-                                              "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f\n",
+                                              "%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%u\n",
                                               static_cast<unsigned long long>(event.stream_sample.timestamp_us / 1000U),
                                               event.stream_sample.accel_x,
                                               event.stream_sample.accel_y,
                                               event.stream_sample.accel_z,
                                               event.stream_sample.roll,
                                               event.stream_sample.pitch,
-                                              0.0f);
+                                              0.0f,
+                                              static_cast<unsigned>(event.stream_sample.state));
                 if (len > 0 && static_cast<std::size_t>(len) < line.buffer.size()) {
                     line.length = static_cast<std::uint16_t>(len);
-                    storage::AppendDebugLog(line);
+                    if (!storage::AppendDebugLog(line)) {
+                        storage::FlushDebugLog();
+                        last_flush_us_ = static_cast<std::uint64_t>(esp_timer_get_time());
+                        if (!storage::AppendDebugLog(line)) {
+                            ESP_LOGW(kTag, "Debug log dropped after buffer-full flush");
+                        }
+                    }
                 }
             } else {
                 TimeInfo time_info{};
@@ -394,6 +402,12 @@ void Logger::TaskLoop() noexcept {
             } else {
                 ESP_LOGE(kTag, "Parameter MQTT publish failed");
             }
+        }
+
+        const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
+        if (now_us - last_flush_us_ >= 1000000ULL) {
+            storage::FlushDebugLog();
+            last_flush_us_ = now_us;
         }
     }
 }
