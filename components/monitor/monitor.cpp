@@ -456,6 +456,8 @@ bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
     if (pub_state == NodeState::DISTURBED) {
         static_cast<void>(ComputeSwayAndDamping(result));
         if (is_exit) {
+            psd_accum_.fill(0.0f);
+
             PeakList roll_peaks, pitch_peaks;
             DecayRegion roll_decay = FindDecayRegion(roll_history_, roll_peaks);
             DecayRegion pitch_decay = FindDecayRegion(pitch_history_, pitch_peaks);
