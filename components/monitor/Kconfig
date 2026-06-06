@@ -160,6 +160,14 @@ config MONITOR_DISTURBED_EXIT_DEBOUNCE
     help
         Number of consecutive samples below the low threshold to transition to IDLE.
 
+config MONITOR_DEBUG_DUMP
+    bool "Enable debug data dump to SD card"
+    default n
+    help
+        When enabled, intermediate FFT/decay region/peak/damping data is dumped
+        to /sdcard/dbg_dump.csv on each DISTURBED->IDLE transition for offline
+        analysis with scripts/debug_analyze.py.
+
 endmenu
 
 

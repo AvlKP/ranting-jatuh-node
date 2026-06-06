@@ -117,6 +117,13 @@ private:
     [[nodiscard]] DecayRegion FindDecayRegion(const std::array<float, kStorageSamples>& data, PeakList& out_peaks) const noexcept;
     [[nodiscard]] float ComputeDampingRegression(const PeakList& peaks, float natural_freq_hz) const noexcept;
 
+#if CONFIG_MONITOR_DEBUG_DUMP
+    void DumpDebugToSD(const DecayRegion& roll_decay, const DecayRegion& pitch_decay,
+                       const PeakList& roll_peaks, const PeakList& pitch_peaks,
+                       float freq_roll_hz, float freq_pitch_hz,
+                       float zeta_roll, float zeta_pitch) noexcept;
+#endif
+
     void CheckFailureEvents() noexcept;
     void PublishFailure(FailureEvent event) noexcept;
     static void AeGpioIsr(void* arg) noexcept;
@@ -177,6 +184,8 @@ private:
 
     std::array<float, kFftWindowSamples * 2U> fft_input_{};
     std::array<float, kFftWindowSamples / 2U> psd_accum_{};
+    PeakList roll_peaks_{};
+    PeakList pitch_peaks_{};
     bool fft_initialized_{false};
 
     void* adc_handle_{nullptr};

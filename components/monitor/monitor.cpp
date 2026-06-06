@@ -443,16 +443,23 @@ bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
     if (pub_state == NodeState::DISTURBED) {
         static_cast<void>(ComputeSwayAndDamping(result));
         if (is_exit) {
-            PeakList roll_peaks, pitch_peaks;
-            DecayRegion roll_decay = FindDecayRegion(roll_history_, roll_peaks);
-            DecayRegion pitch_decay = FindDecayRegion(pitch_history_, pitch_peaks);
+            roll_peaks_ = PeakList{};
+            pitch_peaks_ = PeakList{};
+            DecayRegion roll_decay = FindDecayRegion(roll_history_, roll_peaks_);
+            DecayRegion pitch_decay = FindDecayRegion(pitch_history_, pitch_peaks_);
             
             result.natural_freq_roll_hz = ComputeAxisNaturalFrequency(roll_history_, roll_decay.start_index, roll_decay.count);
             result.natural_freq_pitch_hz = ComputeAxisNaturalFrequency(pitch_history_, pitch_decay.start_index, pitch_decay.count);
             result.natural_freq_hz = std::max(result.natural_freq_roll_hz, result.natural_freq_pitch_hz);
             
-            result.roll_damping_ratio = ComputeDampingRegression(roll_peaks, result.natural_freq_roll_hz);
-            result.pitch_damping_ratio = ComputeDampingRegression(pitch_peaks, result.natural_freq_pitch_hz);
+            result.roll_damping_ratio = ComputeDampingRegression(roll_peaks_, result.natural_freq_roll_hz);
+            result.pitch_damping_ratio = ComputeDampingRegression(pitch_peaks_, result.natural_freq_pitch_hz);
+
+#if CONFIG_MONITOR_DEBUG_DUMP
+            DumpDebugToSD(roll_decay, pitch_decay, roll_peaks_, pitch_peaks_,
+                          result.natural_freq_roll_hz, result.natural_freq_pitch_hz,
+                          result.roll_damping_ratio, result.pitch_damping_ratio);
+#endif
         } else {
             result.natural_freq_roll_hz = 0.0f;
             result.natural_freq_pitch_hz = 0.0f;
@@ -955,5 +962,75 @@ void Monitor::GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, 
         }
     }
 }
+
+#if CONFIG_MONITOR_DEBUG_DUMP
+void Monitor::DumpDebugToSD(const DecayRegion& roll_decay, const DecayRegion& pitch_decay,
+                            const PeakList& roll_peaks, const PeakList& pitch_peaks,
+                            float freq_roll_hz, float freq_pitch_hz,
+                            float zeta_roll, float zeta_pitch) noexcept {
+    FILE* f = fopen(CONFIG_APP_SD_MOUNT_POINT "/dbg_dump.csv", "a");
+    if (f == nullptr) {
+        static bool warned = false;
+        if (!warned) {
+            ESP_LOGW(kTag, "DEBUG_DUMP: Failed to open /sdcard/dbg_dump.csv (SD not mounted?)");
+            warned = true;
+        }
+        return;
+    }
+
+    std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    std::size_t buf_size = BufferSize();
+    float rate_hz = static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+
+    std::fprintf(f, ">>>SNAPSHOT\n");
+    std::fprintf(f, "META,%llu,%u,%.3f\n",
+                 static_cast<unsigned long long>(now_us),
+                 static_cast<unsigned>(buf_size),
+                 static_cast<double>(rate_hz));
+
+    std::fprintf(f, "DECAY,R,%u,%u\n",
+                 static_cast<unsigned>(roll_decay.start_index),
+                 static_cast<unsigned>(roll_decay.count));
+    std::fprintf(f, "DECAY,P,%u,%u\n",
+                 static_cast<unsigned>(pitch_decay.start_index),
+                 static_cast<unsigned>(pitch_decay.count));
+
+    std::fprintf(f, "RESULT,R,%.6f,%.6f\n",
+                 static_cast<double>(freq_roll_hz),
+                 static_cast<double>(zeta_roll));
+    std::fprintf(f, "RESULT,P,%.6f,%.6f\n",
+                 static_cast<double>(freq_pitch_hz),
+                 static_cast<double>(zeta_pitch));
+
+    auto write_peaks = [&f](char axis, const PeakList& peaks) {
+        std::fprintf(f, "PEAKS,%c,%u", axis, static_cast<unsigned>(peaks.count));
+        for (std::size_t i = 0U; i < peaks.count; ++i) {
+            std::fprintf(f, ",%.6f,%.6f",
+                         static_cast<double>(peaks.amplitudes[i]),
+                         static_cast<double>(peaks.times[i]));
+        }
+        std::fprintf(f, "\n");
+    };
+    write_peaks('R', roll_peaks);
+    write_peaks('P', pitch_peaks);
+
+    auto write_raw = [this, &f](char axis, const std::array<float, kStorageSamples>& history) {
+        std::fprintf(f, "RAW,%c", axis);
+        for (std::size_t i = 0U; i < kStorageSamples; ++i) {
+            std::size_t idx = PhysicalIndex(i);
+            std::fprintf(f, ",%.6f", static_cast<double>(history[idx]));
+        }
+        std::fprintf(f, "\n");
+    };
+    write_raw('R', roll_history_);
+    write_raw('P', pitch_history_);
+
+    std::fprintf(f, "<<<END\n");
+    std::fclose(f);
+
+    ESP_LOGI(kTag, "DEBUG_DUMP: Snapshot written to /sdcard/dbg_dump.csv (%u samples)",
+             static_cast<unsigned>(buf_size));
+}
+#endif
 
 } // namespace monitor
