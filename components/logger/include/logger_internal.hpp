@@ -37,6 +37,12 @@ void SetMountPoint(const char* mount_point) noexcept;
 [[nodiscard]] bool ResetDebugLog() noexcept;
 [[nodiscard]] bool AppendDebugLog(const CsvLine& line) noexcept;
 [[nodiscard]] bool FlushDebugLog() noexcept;
+[[nodiscard]] bool ResetDebugFftLog() noexcept;
+[[nodiscard]] bool ResetDebugPeaksLog() noexcept;
+[[nodiscard]] bool BuildDebugFftPath(char* path, std::size_t path_len) noexcept;
+[[nodiscard]] bool BuildDebugPeaksPath(char* path, std::size_t path_len) noexcept;
+[[nodiscard]] bool FlushDebugCsvBatch(const char* path, const CsvLine* lines, std::size_t count) noexcept;
+[[nodiscard]] bool WriteDebugCsvRow(const char* path, const CsvLine& line) noexcept;
 void MarkSdUnhealthy() noexcept;
 [[nodiscard]] bool IsSdHealthy() noexcept;
 } // namespace storage

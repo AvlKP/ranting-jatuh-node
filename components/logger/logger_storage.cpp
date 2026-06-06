@@ -114,6 +114,40 @@ bool BuildDebugLogPath(char* path, std::size_t path_len) {
     return len > 0 && static_cast<std::size_t>(len) < path_len;
 }
 
+} // namespace
+
+bool BuildDebugFftPath(char* path, std::size_t path_len) {
+    if (path == nullptr || path_len == 0U) {
+        return false;
+    }
+    if (s_mount_point == nullptr) {
+        return false;
+    }
+
+    const int len = std::snprintf(path,
+                                  path_len,
+                                  "%s/fft.csv",
+                                  s_mount_point);
+    return len > 0 && static_cast<std::size_t>(len) < path_len;
+}
+
+bool BuildDebugPeaksPath(char* path, std::size_t path_len) {
+    if (path == nullptr || path_len == 0U) {
+        return false;
+    }
+    if (s_mount_point == nullptr) {
+        return false;
+    }
+
+    const int len = std::snprintf(path,
+                                  path_len,
+                                  "%s/peaks.csv",
+                                  s_mount_point);
+    return len > 0 && static_cast<std::size_t>(len) < path_len;
+}
+
+namespace {
+
 bool AppendLine(const char* path, const CsvLine& line) {
     FILE* file = std::fopen(path, "a");
     if (file == nullptr) {
@@ -288,6 +322,106 @@ bool FlushDebugLog() noexcept {
 #else
     return true;
 #endif
+}
+
+bool ResetDebugFftLog() noexcept {
+#if CONFIG_APP_DEBUG_CSV_LOGS
+    if (s_mount_point == nullptr || std::strlen(s_mount_point) == 0U) {
+        return false;
+    }
+    char path[kPathMax]{};
+    if (!BuildDebugFftPath(path, sizeof(path))) {
+        return false;
+    }
+    FILE* file = std::fopen(path, "w");
+    if (file == nullptr) {
+        ESP_LOGE(kTag, "Open debug fft log for write failed: %s errno=%d (%s)",
+                 path, errno, std::strerror(errno));
+        MarkSdUnhealthy();
+        return false;
+    }
+    const char* header = "timestamp_ms,axis,bin,freq_hz,psd_power\n";
+    const std::size_t header_len = std::strlen(header);
+    const std::size_t written = std::fwrite(header, 1U, header_len, file);
+    std::fclose(file);
+    return written == header_len;
+#else
+    return true;
+#endif
+}
+
+bool ResetDebugPeaksLog() noexcept {
+#if CONFIG_APP_DEBUG_CSV_LOGS
+    if (s_mount_point == nullptr || std::strlen(s_mount_point) == 0U) {
+        return false;
+    }
+    char path[kPathMax]{};
+    if (!BuildDebugPeaksPath(path, sizeof(path))) {
+        return false;
+    }
+    FILE* file = std::fopen(path, "w");
+    if (file == nullptr) {
+        ESP_LOGE(kTag, "Open debug peaks log for write failed: %s errno=%d (%s)",
+                 path, errno, std::strerror(errno));
+        MarkSdUnhealthy();
+        return false;
+    }
+    const char* header = "timestamp_ms,axis,peak_idx,time_s,amplitude_deg,log_amplitude\n";
+    const std::size_t header_len = std::strlen(header);
+    const std::size_t written = std::fwrite(header, 1U, header_len, file);
+    std::fclose(file);
+    return written == header_len;
+#else
+    return true;
+#endif
+}
+
+bool FlushDebugCsvBatch(const char* path, const CsvLine* lines, std::size_t count) noexcept {
+    if (lines == nullptr || count == 0U) {
+        return true;
+    }
+    if (!IsSdHealthy()) {
+        return false;
+    }
+    FILE* file = std::fopen(path, "a");
+    if (file == nullptr) {
+        ESP_LOGE(kTag, "Open csv batch for flush failed: %s errno=%d (%s)",
+                 path, errno, std::strerror(errno));
+        MarkSdUnhealthy();
+        return false;
+    }
+    bool success = true;
+    for (std::size_t i = 0U; i < count; ++i) {
+        const std::size_t written = std::fwrite(lines[i].buffer.data(), 1U, lines[i].length, file);
+        if (written != lines[i].length) {
+            ESP_LOGE(kTag, "Csv batch write failed: errno=%d (%s)", errno, std::strerror(errno));
+            MarkSdUnhealthy();
+            success = false;
+            break;
+        }
+    }
+    std::fclose(file);
+    return success;
+}
+
+bool WriteDebugCsvRow(const char* path, const CsvLine& line) noexcept {
+    if (!IsSdHealthy()) {
+        return false;
+    }
+    FILE* file = std::fopen(path, "a");
+    if (file == nullptr) {
+        ESP_LOGE(kTag, "Open csv for row write failed: %s errno=%d (%s)",
+                 path, errno, std::strerror(errno));
+        MarkSdUnhealthy();
+        return false;
+    }
+    const std::size_t written = std::fwrite(line.buffer.data(), 1U, line.length, file);
+    std::fclose(file);
+    if (written != line.length) {
+        ESP_LOGE(kTag, "Csv row write failed: errno=%d (%s)", errno, std::strerror(errno));
+        return false;
+    }
+    return true;
 }
 
 } // namespace logger::storage

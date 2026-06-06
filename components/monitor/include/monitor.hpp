@@ -65,6 +65,17 @@ struct MonitorResult {
     std::uint64_t timestamp_us{0};
 };
 
+struct DecayRegion {
+    std::size_t start_index{0U};
+    std::size_t count{0U};
+};
+struct PeakList {
+    static constexpr std::size_t kMaxPeaks = 256U;
+    std::array<float, kMaxPeaks> amplitudes{};
+    std::array<float, kMaxPeaks> times{};
+    std::size_t count{0U};
+};
+
 using EventCb = void(*)(void* ctx, const MonitorResult& result);
 
 enum class FailureEvent : std::uint8_t {
@@ -95,6 +106,10 @@ public:
     void GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) const noexcept;
 #ifdef CONFIG_APP_DEBUG_CSV_LOGS
     void GetDebugSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) noexcept;
+    [[nodiscard]] bool HasDebugAnalysisData() const noexcept { return has_debug_analysis_data_.load(std::memory_order_acquire); }
+    void GetDebugFftData(float* out_psd_roll, float* out_psd_pitch, std::size_t& out_bin_count, float& out_sample_rate, std::uint64_t& out_timestamp_us) noexcept;
+    void GetDebugPeaksData(PeakList& out_roll, PeakList& out_pitch) noexcept;
+    void ClearDebugAnalysisData() noexcept;
 #endif
     [[nodiscard]] NodeState GetState() const noexcept { return state_; }
     void TaskLoop() noexcept;
@@ -109,16 +124,6 @@ private:
     [[nodiscard]] float ComputeAxisNaturalFrequency(const std::array<float, kStorageSamples>& history, std::size_t start_phys_idx, std::size_t count) noexcept;
     [[nodiscard]] bool ComputeSwayAndDamping(MonitorResult& result) noexcept;
     
-    struct DecayRegion {
-        std::size_t start_index{0U};
-        std::size_t count{0U};
-    };
-    struct PeakList {
-        static constexpr std::size_t kMaxPeaks = 256U;
-        std::array<float, kMaxPeaks> amplitudes{};
-        std::array<float, kMaxPeaks> times{};
-        std::size_t count{0U};
-    };
     [[nodiscard]] DecayRegion FindDecayRegion(const std::array<float, kStorageSamples>& data, PeakList& out_peaks) const noexcept;
     [[nodiscard]] float ComputeDampingRegression(const PeakList& peaks, float natural_freq_hz) const noexcept;
 
@@ -193,6 +198,17 @@ private:
     std::array<StreamSample, kDebugRingSize> debug_samples_{};
     std::atomic<std::size_t> debug_write_index_{0U};
     std::atomic<std::size_t> debug_count_{0U};
+
+    std::array<float, kFftWindowSamples / 2U> debug_psd_roll_{};
+    std::array<float, kFftWindowSamples / 2U> debug_psd_pitch_{};
+    std::size_t debug_psd_bin_count_{0U};
+    float debug_psd_sample_rate_{0.0f};
+    std::uint64_t debug_analysis_timestamp_us_{0U};
+    std::atomic<bool> has_debug_analysis_data_{false};
+
+    PeakList debug_peaks_roll_{};
+    PeakList debug_peaks_pitch_{};
+    std::array<float, kFftWindowSamples / 2U> debug_psd_transfer_{};
 #endif
 
     static constexpr std::size_t kMaxStreamSamples = 20U;

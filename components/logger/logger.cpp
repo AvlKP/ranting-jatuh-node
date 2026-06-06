@@ -2,9 +2,11 @@
 #include "logger_internal.hpp"
 
 #include <array>
+#include <cmath>
 #include <cstdio>
 #include <cstring>
 #include <ctime>
+#include <memory>
 
 #include "esp_log.h"
 #include "esp_timer.h"
@@ -216,6 +218,12 @@ bool Logger::Init(const Config& config) noexcept {
     if (!storage::ResetDebugLog()) {
         ESP_LOGE(kTag, "Failed to reset debug log");
     }
+    if (!storage::ResetDebugFftLog()) {
+        ESP_LOGE(kTag, "Failed to reset debug FFT log");
+    }
+    if (!storage::ResetDebugPeaksLog()) {
+        ESP_LOGE(kTag, "Failed to reset debug peaks log");
+    }
 
     if (!mqtt::Init()) {
         ESP_LOGE(kTag, "MQTT init failed");
@@ -399,6 +407,81 @@ void Logger::TaskLoop() noexcept {
                         }
                     }
                 } while (drain_count == kDebugDrainMax);
+
+                if (debug_monitor_->HasDebugAnalysisData()) {
+                    std::size_t bin_count = 0U;
+                    float sample_rate = 0.0f;
+                    std::uint64_t ts_us = 0U;
+                    auto psd_roll = std::make_unique<std::array<float, 512U>>();
+                    auto psd_pitch = std::make_unique<std::array<float, 512U>>();
+                    debug_monitor_->GetDebugFftData(psd_roll->data(), psd_pitch->data(), bin_count, sample_rate, ts_us);
+
+                    if (bin_count > 0U && bin_count <= 512U) {
+                        char path[128]{};
+                        if (storage::BuildDebugFftPath(path, sizeof(path))) {
+                            CsvLine line{};
+                            const std::uint64_t ts_ms = ts_us / 1000U;
+
+                            for (std::size_t bin = 0U; bin < bin_count; ++bin) {
+                                const float freq_hz = (static_cast<float>(bin) * sample_rate) / static_cast<float>(bin_count * 2U);
+                                const int len = std::snprintf(line.buffer.data(), line.buffer.size(),
+                                                              "%llu,roll,%zu,%.3f,%.6f\n",
+                                                              static_cast<unsigned long long>(ts_ms),
+                                                              bin, freq_hz, (*psd_roll)[bin]);
+                                if (len > 0 && static_cast<std::size_t>(len) < line.buffer.size()) {
+                                    line.length = static_cast<std::uint16_t>(len);
+                                    storage::WriteDebugCsvRow(path, line);
+                                }
+                            }
+                            for (std::size_t bin = 0U; bin < bin_count; ++bin) {
+                                const float freq_hz = (static_cast<float>(bin) * sample_rate) / static_cast<float>(bin_count * 2U);
+                                const int len = std::snprintf(line.buffer.data(), line.buffer.size(),
+                                                              "%llu,pitch,%zu,%.3f,%.6f\n",
+                                                              static_cast<unsigned long long>(ts_ms),
+                                                              bin, freq_hz, (*psd_pitch)[bin]);
+                                if (len > 0 && static_cast<std::size_t>(len) < line.buffer.size()) {
+                                    line.length = static_cast<std::uint16_t>(len);
+                                    storage::WriteDebugCsvRow(path, line);
+                                }
+                            }
+                        }
+                    }
+
+                    auto peaks_roll = std::make_unique<monitor::PeakList>();
+                    auto peaks_pitch = std::make_unique<monitor::PeakList>();
+                    debug_monitor_->GetDebugPeaksData(*peaks_roll, *peaks_pitch);
+
+                    char path[128]{};
+                    if (storage::BuildDebugPeaksPath(path, sizeof(path))) {
+                        CsvLine line{};
+                        const std::uint64_t peak_ts_ms = ts_us / 1000U;
+
+                        for (std::size_t i = 0U; i < peaks_roll->count; ++i) {
+                            const float log_amp = std::log(peaks_roll->amplitudes[i]);
+                            const int len = std::snprintf(line.buffer.data(), line.buffer.size(),
+                                                          "%llu,roll,%zu,%.3f,%.3f,%.4f\n",
+                                                          static_cast<unsigned long long>(peak_ts_ms),
+                                                          i, peaks_roll->times[i], peaks_roll->amplitudes[i], log_amp);
+                            if (len > 0 && static_cast<std::size_t>(len) < line.buffer.size()) {
+                                line.length = static_cast<std::uint16_t>(len);
+                                storage::WriteDebugCsvRow(path, line);
+                            }
+                        }
+                        for (std::size_t i = 0U; i < peaks_pitch->count; ++i) {
+                            const float log_amp = std::log(peaks_pitch->amplitudes[i]);
+                            const int len = std::snprintf(line.buffer.data(), line.buffer.size(),
+                                                          "%llu,pitch,%zu,%.3f,%.3f,%.4f\n",
+                                                          static_cast<unsigned long long>(peak_ts_ms),
+                                                          i, peaks_pitch->times[i], peaks_pitch->amplitudes[i], log_amp);
+                            if (len > 0 && static_cast<std::size_t>(len) < line.buffer.size()) {
+                                line.length = static_cast<std::uint16_t>(len);
+                                storage::WriteDebugCsvRow(path, line);
+                            }
+                        }
+                    }
+
+                    debug_monitor_->ClearDebugAnalysisData();
+                }
             }
 #endif
             storage::FlushDebugLog();

@@ -461,11 +461,24 @@ bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
             DecayRegion pitch_decay = FindDecayRegion(pitch_history_, pitch_peaks);
             
             result.natural_freq_roll_hz = ComputeAxisNaturalFrequency(roll_history_, roll_decay.start_index, roll_decay.count);
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+            debug_psd_roll_ = debug_psd_transfer_;
+            debug_analysis_timestamp_us_ = static_cast<std::uint64_t>(esp_timer_get_time());
+#endif
             result.natural_freq_pitch_hz = ComputeAxisNaturalFrequency(pitch_history_, pitch_decay.start_index, pitch_decay.count);
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+            debug_psd_pitch_ = debug_psd_transfer_;
+#endif
             result.natural_freq_hz = std::max(result.natural_freq_roll_hz, result.natural_freq_pitch_hz);
             
             result.roll_damping_ratio = ComputeDampingRegression(roll_peaks, result.natural_freq_roll_hz);
             result.pitch_damping_ratio = ComputeDampingRegression(pitch_peaks, result.natural_freq_pitch_hz);
+
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+            debug_peaks_roll_ = roll_peaks;
+            debug_peaks_pitch_ = pitch_peaks;
+            has_debug_analysis_data_.store(true, std::memory_order_release);
+#endif
         } else {
             result.natural_freq_roll_hz = 0.0f;
             result.natural_freq_pitch_hz = 0.0f;
@@ -543,7 +556,7 @@ bool Monitor::ComputeStats(MonitorResult& result) const noexcept {
 }
 
 
-Monitor::DecayRegion Monitor::FindDecayRegion(const std::array<float, kStorageSamples>& data, PeakList& out_peaks) const noexcept {
+DecayRegion Monitor::FindDecayRegion(const std::array<float, kStorageSamples>& data, PeakList& out_peaks) const noexcept {
     DecayRegion region{};
     out_peaks.count = 0U;
 
@@ -716,11 +729,14 @@ float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSampl
 
         float max_val = 0.0f;
         std::size_t max_bin = 0U;
+        std::array<float, kFftWindowSamples / 2U> local_psd{};
 
         for (std::size_t bin = 1U; bin < (fft_size / 2U); ++bin) {
             const float real = fft_input_[2U * bin];
             const float imag = fft_input_[2U * bin + 1U];
             const float power = (real * real) + (imag * imag);
+
+            local_psd[bin] = power;
 
             if (power > max_val) {
                 max_val = power;
@@ -734,6 +750,14 @@ float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSampl
                 psd_accum_[bin] += power;
             }
         }
+
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+        debug_psd_bin_count_ = static_cast<std::size_t>(kFftWindowSamples / 2U);
+        debug_psd_sample_rate_ = sample_rate_hz;
+        for (std::size_t bin = 0U; bin < debug_psd_bin_count_; ++bin) {
+            debug_psd_transfer_[bin] = local_psd[bin];
+        }
+#endif
 
         return (static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(fft_size);
     }
@@ -802,6 +826,14 @@ float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSampl
             max_bin = bin;
         }
     }
+
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+    debug_psd_bin_count_ = static_cast<std::size_t>(kFftWindowSamples / 2U);
+    debug_psd_sample_rate_ = sample_rate_hz;
+    for (std::size_t bin = 0U; bin < debug_psd_bin_count_; ++bin) {
+        debug_psd_transfer_[bin] = local_psd[bin];
+    }
+#endif
 
     return (static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(kFftWindowSamples);
 }
@@ -988,6 +1020,33 @@ void Monitor::GetDebugSamples(StreamSample* out_samples, std::size_t& out_len, s
     if (remaining == 0U) {
         debug_write_index_.store(0U, std::memory_order_release);
     }
+}
+
+void Monitor::GetDebugFftData(float* out_psd_roll, float* out_psd_pitch, std::size_t& out_bin_count, float& out_sample_rate, std::uint64_t& out_timestamp_us) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    out_bin_count = debug_psd_bin_count_;
+    out_sample_rate = debug_psd_sample_rate_;
+    out_timestamp_us = debug_analysis_timestamp_us_;
+    if (out_psd_roll != nullptr) {
+        for (std::size_t i = 0U; i < out_bin_count; ++i) {
+            out_psd_roll[i] = debug_psd_roll_[i];
+        }
+    }
+    if (out_psd_pitch != nullptr) {
+        for (std::size_t i = 0U; i < out_bin_count; ++i) {
+            out_psd_pitch[i] = debug_psd_pitch_[i];
+        }
+    }
+}
+
+void Monitor::GetDebugPeaksData(PeakList& out_roll, PeakList& out_pitch) noexcept {
+    std::lock_guard<std::mutex> lock(mutex_);
+    out_roll = debug_peaks_roll_;
+    out_pitch = debug_peaks_pitch_;
+}
+
+void Monitor::ClearDebugAnalysisData() noexcept {
+    has_debug_analysis_data_.store(false, std::memory_order_release);
 }
 #endif
 
