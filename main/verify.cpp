@@ -1,4 +1,5 @@
 #include "verify.hpp"
+#include "logger_internal.hpp"
 
 #include <cstdint>
 #include <array>
@@ -78,7 +79,7 @@ bool VerifySdStorage() {
 }
 
 bool VerifyMqtt(logger::Logger& logger) {
-    const char* topic = CONFIG_APP_VERIFY_MQTT_TOPIC;
+    const char* topic = logger::mqtt::GetTopic("verify");
     if (topic == nullptr || std::strlen(topic) == 0U) {
         ESP_LOGE(kVerifyTag, "MQTT verify topic not set");
         return false;

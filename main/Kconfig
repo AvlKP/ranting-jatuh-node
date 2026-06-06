@@ -27,6 +27,11 @@ config APP_VERIFY_ENABLE
 config APP_VERIFY_MQTT_TOPIC
     string "MQTT verify topic"
     default "ranting/verify"
+    help
+        DEPRECATED: This option is no longer used. The verify utility now
+        uses the runtime node ID-prefixed topic from logger::mqtt::GetTopic().
+        The topic will be "ranting/{node_id}/verify" where node_id is
+        resolved from Kconfig, NVS, or auto-generation.
 
 config APP_VERIFY_MONITOR_TIMEOUT_MS
     int "Monitor verify timeout (ms)"

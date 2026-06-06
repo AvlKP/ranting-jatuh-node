@@ -1,4 +1,5 @@
 #include "dashboard.hpp"
+#include "logger_internal.hpp"
 #include "mqtt_log.hpp"
 #include "esp_log.h"
 #include "esp_wifi.h"
@@ -733,13 +734,14 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
 
     char chunk_buf[384];
     int len = std::snprintf(chunk_buf, sizeof(chunk_buf),
-                            "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,\"node_state\":\"%s\","
+                            "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,\"node_id\":\"%s\",\"node_state\":\"%s\","
                             "\"natural_freq_roll_hz\":%.3f,\"natural_freq_pitch_hz\":%.3f,"
                             "\"roll_damping_ratio\":%.4f,\"pitch_damping_ratio\":%.4f,",
                             wifi_connected ? "true" : "false",
                             g_self->logger_.HasMonitorResult() ? "true" : "false", // Use logger state as MQTT proxy
                             static_cast<unsigned long>(esp_get_free_heap_size()),
                             CONFIG_MONITOR_IMU_RATE_HZ,
+                            logger::mqtt::GetNodeId(),
                             state_str,
                             freq_roll,
                             freq_pitch,

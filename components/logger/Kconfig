@@ -76,4 +76,14 @@ config LOGGER_MQTT_QOS
     default 0
     range 0 2
 
+config LOGGER_NODE_ID
+    string "Node ID"
+    default ""
+    help
+        Unique identifier for this node. When empty (default), the node ID is
+        read from NVS if previously persisted, or auto-generated as an
+        adjective-noun pair (e.g. "quiet-pine") on first boot and written to
+        NVS. Set this to a non-empty string to override NVS-based resolution
+        for factory provisioning.
+
 endmenu
