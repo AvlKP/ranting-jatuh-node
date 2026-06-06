@@ -707,7 +707,7 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
 
     // Start JSON streaming using chunked response to conserve RAM
-    httpd_resp_send_chunk(req, "{\"node_id\":\"", 11);
+    httpd_resp_send_chunk(req, "{\"node_id\":\"", 12);
     httpd_resp_send_chunk(req, logger::mqtt::GetNodeId(), std::strlen(logger::mqtt::GetNodeId()));
     httpd_resp_send_chunk(req, "\",", 2);
 
@@ -789,29 +789,33 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
     // MicroSD Directory browser
     httpd_resp_send_chunk(req, "\"files\":[", 9);
     bool first_file = true;
-    DIR* dir = opendir(CONFIG_APP_SD_MOUNT_POINT);
-    if (dir != nullptr) {
-        struct dirent* entry;
-        while ((entry = readdir(dir)) != nullptr) {
-            if (entry->d_type == DT_REG) {
-                char file_path[512];
-                std::snprintf(file_path, sizeof(file_path), "%s/%s", CONFIG_APP_SD_MOUNT_POINT, entry->d_name);
-                struct stat st{};
-                long long fsize = 0;
-                if (stat(file_path, &st) == 0) {
-                    fsize = st.st_size;
+    if (logger::storage::IsSdHealthy()) {
+        DIR* dir = opendir(CONFIG_APP_SD_MOUNT_POINT);
+        if (dir != nullptr) {
+            struct dirent* entry;
+            while ((entry = readdir(dir)) != nullptr) {
+                if (entry->d_type == DT_REG) {
+                    char file_path[512];
+                    std::snprintf(file_path, sizeof(file_path), "%s/%s", CONFIG_APP_SD_MOUNT_POINT, entry->d_name);
+                    struct stat st{};
+                    long long fsize = 0;
+                    if (stat(file_path, &st) == 0) {
+                        fsize = st.st_size;
+                    }
+                    
+                    len = std::snprintf(chunk_buf, sizeof(chunk_buf),
+                                        "%s{\"name\":\"%s\",\"size\":%lld}",
+                                        first_file ? "" : ",",
+                                        entry->d_name,
+                                        fsize);
+                    httpd_resp_send_chunk(req, chunk_buf, len);
+                    first_file = false;
                 }
-                
-                len = std::snprintf(chunk_buf, sizeof(chunk_buf),
-                                    "%s{\"name\":\"%s\",\"size\":%lld}",
-                                    first_file ? "" : ",",
-                                    entry->d_name,
-                                    fsize);
-                httpd_resp_send_chunk(req, chunk_buf, len);
-                first_file = false;
             }
+            closedir(dir);
+        } else {
+            logger::storage::MarkSdUnhealthy();
         }
-        closedir(dir);
     }
     httpd_resp_send_chunk(req, "],", 2);
 
@@ -939,8 +943,14 @@ esp_err_t Dashboard::DownloadHandler(httpd_req_t* req) noexcept {
     char file_path[512];
     std::snprintf(file_path, sizeof(file_path), "%s/%s", CONFIG_APP_SD_MOUNT_POINT, filename);
 
+    if (!logger::storage::IsSdHealthy()) {
+        httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "SD card unavailable");
+        return ESP_FAIL;
+    }
+
     FILE* f = std::fopen(file_path, "rb");
     if (f == nullptr) {
+        logger::storage::MarkSdUnhealthy();
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
         return ESP_FAIL;
     }

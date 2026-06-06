@@ -234,11 +234,15 @@ bool Monitor::Update(float dt_s) noexcept {
     }
 
 #ifdef CONFIG_APP_DEBUG_CSV_LOGS
-    esp_event_post(MONITOR_EVENT_BASE,
-                   MONITOR_EVENT_STREAM_SAMPLE,
-                   &sample,
-                   sizeof(sample),
-                   0);
+    {
+        const std::size_t idx = debug_write_index_.load(std::memory_order_relaxed);
+        debug_samples_[idx] = sample;
+        debug_write_index_.store((idx + 1U) % kDebugRingSize, std::memory_order_release);
+        std::size_t prev_count = debug_count_.load(std::memory_order_acquire);
+        if (prev_count < kDebugRingSize) {
+            debug_count_.store(prev_count + 1U, std::memory_order_release);
+        }
+    }
 #endif
 
     CheckFailureEvents();
@@ -964,5 +968,27 @@ void Monitor::GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, 
         }
     }
 }
+
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+void Monitor::GetDebugSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) noexcept {
+    const std::size_t count = debug_count_.load(std::memory_order_acquire);
+    out_len = (count < max_len) ? count : max_len;
+    if (out_len == 0U || out_samples == nullptr) {
+        return;
+    }
+
+    const std::size_t wr_idx = debug_write_index_.load(std::memory_order_acquire);
+    std::size_t start_idx = (count < kDebugRingSize) ? 0U : wr_idx;
+    for (std::size_t i = 0U; i < out_len; ++i) {
+        out_samples[i] = debug_samples_[(start_idx + i) % kDebugRingSize];
+    }
+
+    const std::size_t remaining = count - out_len;
+    debug_count_.store(remaining, std::memory_order_release);
+    if (remaining == 0U) {
+        debug_write_index_.store(0U, std::memory_order_release);
+    }
+}
+#endif
 
 } // namespace monitor

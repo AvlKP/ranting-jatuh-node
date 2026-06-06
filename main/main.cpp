@@ -227,6 +227,10 @@ extern "C" void app_main(void) {
         return;
     }
 
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+    logger.SetDebugMonitor(monitor);
+#endif
+
     ESP_LOGI(kAppTag, "Synchronizing system time via NTP at startup...");
     if (logger::mqtt::SyncTimeOnce()) {
         ESP_LOGI(kAppTag, "Startup NTP time synchronization successful");

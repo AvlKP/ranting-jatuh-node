@@ -37,6 +37,8 @@ void SetMountPoint(const char* mount_point) noexcept;
 [[nodiscard]] bool ResetDebugLog() noexcept;
 [[nodiscard]] bool AppendDebugLog(const CsvLine& line) noexcept;
 [[nodiscard]] bool FlushDebugLog() noexcept;
+void MarkSdUnhealthy() noexcept;
+[[nodiscard]] bool IsSdHealthy() noexcept;
 } // namespace storage
 
 namespace mqtt {

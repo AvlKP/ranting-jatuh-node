@@ -1,7 +1,8 @@
 # debug-csv-logs Specification
 
 ## Purpose
-TBD - created by archiving change add-debug-csv-logs. Update Purpose after archive.
+Defines the CSV debug logging system for raw acceleration and tilt data, including configuration, ring-buffer delivery from monitor to logger, formatting, batched SD card writes, and exclusion from server transmission.
+
 ## Requirements
 ### Requirement: CSV Debug Logging Configuration
 The system SHALL provide a configuration option to enable or disable CSV debug logging for acceleration and tilt data.
@@ -11,11 +12,19 @@ The system SHALL provide a configuration option to enable or disable CSV debug l
 - **THEN** the system prepares to log raw acceleration and tilt data to a CSV file
 
 ### Requirement: CSV Debug Log Formatting
-The system SHALL format the raw acceleration and tilt data as comma-separated values and buffer them in memory before writing to the CSV file. Each row SHALL include the current node state as an integer column (0=IDLE, 1=DISTURBED).
+The system SHALL format the raw acceleration and tilt data as comma-separated values and buffer them in memory before writing to the CSV file. Each row SHALL include the current node state as an integer column (0=IDLE, 1=DISTURBED). Stream sample data SHALL be delivered from the monitor to the logger via a lock-free atomic ring buffer, NOT through the esp_event system.
 
 #### Scenario: Buffering data row
 - **WHEN** new acceleration and tilt data is available
 - **THEN** the system formats a row containing timestamp, accel_x, accel_y, accel_z, tilt_x, tilt_y, tilt_z, state and appends it to an in-memory ring buffer without writing to the CSV file immediately
+
+#### Scenario: Monitor writes stream samples to ring buffer
+- **WHEN** the monitor acquires a new IMU sample
+- **THEN** the monitor writes a StreamSample entry to the dedicated debug ring buffer using atomic indices, without posting any esp_event
+
+#### Scenario: Logger polls ring buffer
+- **WHEN** the logger task loop performs its 1-second debug flush check
+- **THEN** the logger reads all accumulated StreamSample entries from the ring buffer in batches of up to 32, formats them as CSV rows, and appends them to the storage ring buffer for batched write
 
 ### Requirement: CSV Log File Overwrite
 The system SHALL rewrite (overwrite) the CSV debug log file at the beginning of each run.
@@ -32,10 +41,10 @@ The system SHALL NOT transmit CSV debug logs to the server.
 - **THEN** the system ensures that the CSV debug logs are excluded from the payload
 
 ### Requirement: State Column in StreamSample
-The system SHALL include the current node state in each stream sample sent for debug logging.
+The system SHALL include the current node state in each stream sample stored in the debug ring buffer.
 
 #### Scenario: Monitor includes state
-- **WHEN** the monitor builds a StreamSample for debug logging
+- **WHEN** the monitor writes a StreamSample to the debug ring buffer
 - **THEN** the sample includes a state field reflecting the current node state (IDLE or DISTURBED) as an integer value
 
 ### Requirement: Batched CSV Flush

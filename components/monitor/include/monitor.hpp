@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -92,6 +93,9 @@ public:
     void GetFftData(float* out_psd, std::size_t& out_len) const noexcept;
     void GetTiltHistory(float* out_roll, float* out_pitch, std::size_t& out_len, std::size_t max_len) const noexcept;
     void GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) const noexcept;
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+    void GetDebugSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) noexcept;
+#endif
     [[nodiscard]] NodeState GetState() const noexcept { return state_; }
     void TaskLoop() noexcept;
 
@@ -183,6 +187,13 @@ private:
     void* adc_handle_{nullptr};
     bool adc_initialized_{false};
     volatile bool ae_gpio_event_{false};
+
+#ifdef CONFIG_APP_DEBUG_CSV_LOGS
+    static constexpr std::size_t kDebugRingSize = 256U;
+    std::array<StreamSample, kDebugRingSize> debug_samples_{};
+    std::atomic<std::size_t> debug_write_index_{0U};
+    std::atomic<std::size_t> debug_count_{0U};
+#endif
 
     static constexpr std::size_t kMaxStreamSamples = 20U;
     std::array<StreamSample, kMaxStreamSamples> stream_samples_{};

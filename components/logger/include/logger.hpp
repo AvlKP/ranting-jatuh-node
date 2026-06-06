@@ -25,6 +25,8 @@ public:
     [[nodiscard]] bool VerifyMqttPublish(const char* topic, const char* payload) noexcept;
     [[nodiscard]] bool HasMonitorResult() const noexcept;
 
+    void SetDebugMonitor(monitor::Monitor& monitor) noexcept { debug_monitor_ = &monitor; }
+
     static void EventHandler(void* handler_args,
                               esp_event_base_t base,
                               std::int32_t id,
@@ -34,15 +36,13 @@ public:
 private:
     enum class EventType : std::uint8_t {
         Parameters = 0U,
-        Failure = 1U,
-        StreamSample = 2U
+        Failure = 1U
     };
 
     struct Event {
         EventType type{EventType::Parameters};
         monitor::MonitorResult monitor{};
         monitor::FailureResult failure{};
-        monitor::StreamSample stream_sample{};
     };
 
     static constexpr std::size_t kQueueDepth = 16U;
@@ -56,6 +56,7 @@ private:
     std::uint64_t last_flush_us_{0U};
     const char* sd_mount_point_{nullptr};
     bool has_monitor_result_{false};
+    monitor::Monitor* debug_monitor_{nullptr};
 };
 
 } // namespace logger

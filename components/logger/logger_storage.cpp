@@ -1,10 +1,13 @@
 #include "logger_internal.hpp"
 
 #include <cerrno>
+#include <cstdint>
 #include <cstdio>
 #include <cstring>
 
 #include "esp_log.h"
+
+#include "esp_timer.h"
 
 #include "sdkconfig.h"
 namespace logger::storage {
@@ -14,6 +17,10 @@ namespace {
 constexpr std::size_t kPathMax = 128U;
 const char* s_mount_point = nullptr;
 static const char* kTag = "LOGGER_STORAGE";
+
+constexpr std::uint64_t kSdCooldownUs = 5000000ULL;
+std::atomic<bool> g_sd_healthy{true};
+std::uint64_t g_sd_unhealthy_since_us{0U};
 
 #if CONFIG_APP_DEBUG_CSV_LOGS
 constexpr std::size_t kDebugBufferMax = 64U;
@@ -45,6 +52,7 @@ bool EnsureFileHeader(const char* path, const char* header) {
                  path,
                  errno,
                  std::strerror(errno));
+        MarkSdUnhealthy();
         return false;
     }
 
@@ -56,6 +64,7 @@ bool EnsureFileHeader(const char* path, const char* header) {
                  path,
                  errno,
                  std::strerror(errno));
+        MarkSdUnhealthy();
     }
     return written == header_len;
 }
@@ -112,6 +121,7 @@ bool AppendLine(const char* path, const CsvLine& line) {
                  path,
                  errno,
                  std::strerror(errno));
+        MarkSdUnhealthy();
         return false;
     }
 
@@ -122,11 +132,29 @@ bool AppendLine(const char* path, const CsvLine& line) {
                  path,
                  errno,
                  std::strerror(errno));
+        MarkSdUnhealthy();
     }
     return written == line.length;
 }
 
 } // namespace
+
+void MarkSdUnhealthy() noexcept {
+    g_sd_unhealthy_since_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    g_sd_healthy.store(false, std::memory_order_release);
+}
+
+bool IsSdHealthy() noexcept {
+    if (g_sd_healthy.load(std::memory_order_acquire)) {
+        return true;
+    }
+    const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    if (now_us - g_sd_unhealthy_since_us >= kSdCooldownUs) {
+        g_sd_healthy.store(true, std::memory_order_release);
+        return true;
+    }
+    return false;
+}
 
 void SetMountPoint(const char* mount_point) noexcept {
     s_mount_point = mount_point;
@@ -135,6 +163,9 @@ void SetMountPoint(const char* mount_point) noexcept {
 bool AppendParameter(const TimeInfo& time_info, const CsvLine& line) noexcept {
     if (s_mount_point == nullptr || std::strlen(s_mount_point) == 0U) {
         ESP_LOGE(kTag, "SD mount point not set");
+        return false;
+    }
+    if (!IsSdHealthy()) {
         return false;
     }
 
@@ -151,6 +182,9 @@ bool AppendParameter(const TimeInfo& time_info, const CsvLine& line) noexcept {
 bool AppendFailure(const TimeInfo& time_info, const CsvLine& line) noexcept {
     if (s_mount_point == nullptr || std::strlen(s_mount_point) == 0U) {
         ESP_LOGE(kTag, "SD mount point not set");
+        return false;
+    }
+    if (!IsSdHealthy()) {
         return false;
     }
 
@@ -178,6 +212,7 @@ bool ResetDebugLog() noexcept {
     if (file == nullptr) {
         ESP_LOGE(kTag, "Open debug log for write failed: %s errno=%d (%s)",
                  path, errno, std::strerror(errno));
+        MarkSdUnhealthy();
         return false;
     }
     const char* header = "timestamp_ms,accel_x,accel_y,accel_z,tilt_x,tilt_y,tilt_z,state\n";
@@ -213,6 +248,9 @@ bool FlushDebugLog() noexcept {
     if (s_debug_buffer_count == 0U) {
         return true;
     }
+    if (!IsSdHealthy()) {
+        return false;
+    }
     if (s_mount_point == nullptr || std::strlen(s_mount_point) == 0U) {
         s_debug_buffer_head = 0U;
         s_debug_buffer_count = 0U;
@@ -226,6 +264,7 @@ bool FlushDebugLog() noexcept {
     if (file == nullptr) {
         ESP_LOGE(kTag, "Open debug log for flush failed: %s errno=%d (%s)",
                  path, errno, std::strerror(errno));
+        MarkSdUnhealthy();
         return false;
     }
     bool success = true;
@@ -235,6 +274,7 @@ bool FlushDebugLog() noexcept {
         const std::size_t written = std::fwrite(buf_line.buffer.data(), 1U, buf_line.length, file);
         if (written != buf_line.length) {
             ESP_LOGE(kTag, "Flush write failed: errno=%d (%s)", errno, std::strerror(errno));
+            MarkSdUnhealthy();
             success = false;
             break;
         }
