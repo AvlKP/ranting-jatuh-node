@@ -232,14 +232,6 @@ bool Monitor::Update(float dt_s) noexcept {
         }
     }
 
-#ifdef CONFIG_APP_DEBUG_CSV_LOGS
-    esp_event_post(MONITOR_EVENT_BASE,
-                   MONITOR_EVENT_STREAM_SAMPLE,
-                   &sample,
-                   sizeof(sample),
-                   0);
-#endif
-
     CheckFailureEvents();
 
     if ((sample_count_ >= kStorageSamples) && (write_index_ == 0U)) {

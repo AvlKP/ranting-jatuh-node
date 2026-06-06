@@ -34,15 +34,3 @@ config APP_VERIFY_MONITOR_TIMEOUT_MS
     range 100 600000
 
 endmenu
-
-menu "Debug Configuration"
-
-config APP_DEBUG_CSV_LOGS
-    bool "Enable CSV debug logs for accel and tilt"
-    default n
-    help
-      If enabled, acceleration and tilt data will be logged to a CSV file
-      on the SD card and excluded from server transmission. This helps with
-      offline manual analysis.
-
-endmenu

@@ -2277,15 +2277,6 @@ CONFIG_APP_VERIFY_MQTT_TOPIC="ranting/verify"
 CONFIG_APP_VERIFY_MONITOR_TIMEOUT_MS=60000
 # end of Application Verification
 
-#
-# Debug Configuration
-#
-# CONFIG_APP_DEBUG_CSV_LOGS is not set
-# end of Debug Configuration
-
-#
-# Dashboard
-#
 CONFIG_DASHBOARD_ENABLE=y
 CONFIG_DASHBOARD_PORT=80
 # end of Dashboard

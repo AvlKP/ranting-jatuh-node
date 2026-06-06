@@ -2278,12 +2278,6 @@ CONFIG_APP_VERIFY_MONITOR_TIMEOUT_MS=60000
 # end of Application Verification
 
 #
-# Debug Configuration
-#
-CONFIG_APP_DEBUG_CSV_LOGS=y
-# end of Debug Configuration
-
-#
 # Dashboard
 #
 CONFIG_DASHBOARD_ENABLE=y
