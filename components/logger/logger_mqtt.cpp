@@ -33,6 +33,7 @@ constexpr EventBits_t kMqttConnectedBit = BIT0;
 constexpr std::uint32_t kWifiConnectTimeoutMs = 20000U;
 constexpr std::uint32_t kMqttConnectTimeoutMs = 10000U;
 constexpr std::uint32_t kNtpSyncTimeoutMs = 15000U;
+constexpr std::uint32_t kTxDrainDelayMs = 1000U;
 constexpr std::uint32_t kMinValidEpoch = 1672531200U;
 
 StaticEventGroup_t s_wifi_event_group_buffer{};
@@ -45,6 +46,8 @@ bool s_netif_initialized = false;
 bool s_wifi_initialized = false;
 bool s_events_registered = false;
 bool s_nvs_initialized = false;
+bool s_mqtt_ever_connected = false;
+bool s_mqtt_connected = false;
 std::uint8_t s_last_disconnect_reason = 0U;
 
 esp_mqtt_client_handle_t s_client = nullptr;
@@ -210,9 +213,12 @@ void MqttEventHandler(void*,
     }
 
     if (event_id == MQTT_EVENT_CONNECTED) {
+        s_mqtt_ever_connected = true;
+        s_mqtt_connected = true;
         g_mqtt_log_buffer.Log("MQTT: Connected to broker");
         xEventGroupSetBits(s_mqtt_event_group, kMqttConnectedBit);
     } else if (event_id == MQTT_EVENT_DISCONNECTED) {
+        s_mqtt_connected = false;
         g_mqtt_log_buffer.Log("MQTT: Disconnected from broker");
         xEventGroupClearBits(s_mqtt_event_group, kMqttConnectedBit);
     }
@@ -541,14 +547,21 @@ bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count, co
     }
     SyncTime();
 
-    if (!EnsureMqttClient()) {
-        return false;
-    }
-
-    xEventGroupClearBits(s_mqtt_event_group, kMqttConnectedBit);
-    if (esp_mqtt_client_start(s_client) != ESP_OK) {
-        ESP_LOGE(kTag, "MQTT start failed");
-        return false;
+    if (!s_mqtt_connected) {
+        xEventGroupClearBits(s_mqtt_event_group, kMqttConnectedBit);
+        esp_err_t start_err;
+        if (s_mqtt_ever_connected) {
+            start_err = esp_mqtt_client_reconnect(s_client);
+            if (start_err != ESP_OK) {
+                start_err = esp_mqtt_client_start(s_client);
+            }
+        } else {
+            start_err = esp_mqtt_client_start(s_client);
+        }
+        if (start_err != ESP_OK) {
+            ESP_LOGE(kTag, "MQTT start/reconnect failed");
+            return false;
+        }
     }
 
     const EventBits_t bits = xEventGroupWaitBits(s_mqtt_event_group,
@@ -558,7 +571,6 @@ bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count, co
                                                  pdMS_TO_TICKS(kMqttConnectTimeoutMs));
     if ((bits & kMqttConnectedBit) == 0U) {
         ESP_LOGE(kTag, "MQTT connect timeout");
-        esp_mqtt_client_stop(s_client);
         return false;
     }
 
@@ -589,7 +601,7 @@ bool PublishLines(const char* topic, const CsvLine* lines, std::size_t count, co
         }
     }
 
-    esp_mqtt_client_stop(s_client);
+    vTaskDelay(pdMS_TO_TICKS(kTxDrainDelayMs));
     return ok;
 }
 
@@ -603,14 +615,21 @@ bool PublishRawInternal(const char* topic, const char* payload, const char* cont
     }
     SyncTime();
 
-    if (!EnsureMqttClient()) {
-        return false;
-    }
-
-    xEventGroupClearBits(s_mqtt_event_group, kMqttConnectedBit);
-    if (esp_mqtt_client_start(s_client) != ESP_OK) {
-        ESP_LOGE(kTag, "MQTT start failed");
-        return false;
+    if (!s_mqtt_connected) {
+        xEventGroupClearBits(s_mqtt_event_group, kMqttConnectedBit);
+        esp_err_t start_err;
+        if (s_mqtt_ever_connected) {
+            start_err = esp_mqtt_client_reconnect(s_client);
+            if (start_err != ESP_OK) {
+                start_err = esp_mqtt_client_start(s_client);
+            }
+        } else {
+            start_err = esp_mqtt_client_start(s_client);
+        }
+        if (start_err != ESP_OK) {
+            ESP_LOGE(kTag, "MQTT start/reconnect failed");
+            return false;
+        }
     }
 
     const EventBits_t bits = xEventGroupWaitBits(s_mqtt_event_group,
@@ -620,7 +639,6 @@ bool PublishRawInternal(const char* topic, const char* payload, const char* cont
                                                  pdMS_TO_TICKS(kMqttConnectTimeoutMs));
     if ((bits & kMqttConnectedBit) == 0U) {
         ESP_LOGE(kTag, "MQTT connect timeout");
-        esp_mqtt_client_stop(s_client);
         return false;
     }
 
@@ -629,7 +647,6 @@ bool PublishRawInternal(const char* topic, const char* payload, const char* cont
     s_publish_property.content_type = resolved_type;
     if (esp_mqtt5_client_set_publish_property(s_client, &s_publish_property) != ESP_OK) {
         ESP_LOGE(kTag, "MQTT5 publish property set failed");
-        esp_mqtt_client_stop(s_client);
         return false;
     }
 
@@ -641,11 +658,10 @@ bool PublishRawInternal(const char* topic, const char* payload, const char* cont
                                                0);
     if (msg_id < 0) {
         ESP_LOGE(kTag, "MQTT publish failed");
-        esp_mqtt_client_stop(s_client);
         return false;
     }
 
-    esp_mqtt_client_stop(s_client);
+    vTaskDelay(pdMS_TO_TICKS(kTxDrainDelayMs));
     return true;
 }
 #if CONFIG_DASHBOARD_ENABLE
@@ -766,10 +782,15 @@ bool SyncTimeOnce() noexcept {
 
 bool Init() noexcept {
 #if CONFIG_DASHBOARD_ENABLE
-    return StartWifiPersistent();
+    if (!StartWifiPersistent()) {
+        return false;
+    }
 #else
-    return InitWifiCore();
+    if (!InitWifiCore()) {
+        return false;
+    }
 #endif
+    return EnsureMqttClient();
 }
 
 bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept {
