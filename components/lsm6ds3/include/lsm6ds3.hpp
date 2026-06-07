@@ -90,6 +90,11 @@ public:
     /// @brief Reads the latest Gyro + Accel samples from output registers
     bool read_accel_gyro(lsm6ds3::Value& out_gyro, lsm6ds3::Value& out_accel);
 
+    /// @brief Reads the on-die temperature sensor
+    /// @param out_temp_c Temperature in degrees Celsius
+    /// @return true on success, false on I2C failure
+    bool read_temp(float& out_temp_c);
+
     // --- 3. Motion Detection ---
     bool configure_motion_detection(uint8_t tap_ths = 0x09, uint8_t wakeup_ths = 0x02,
                                     uint8_t freefall_ths = 0x03, uint8_t ff_dur = 5);

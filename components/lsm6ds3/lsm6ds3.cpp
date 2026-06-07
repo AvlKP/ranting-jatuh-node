@@ -136,6 +136,18 @@ bool Lsm6ds3::read_accel_gyro(lsm6ds3::Value& out_gyro, lsm6ds3::Value& out_acce
     return true;
 }
 
+bool Lsm6ds3::read_temp(float& out_temp_c) {
+    uint8_t data[2];
+    if (!config_.read_cb(static_cast<uint8_t>(lsm6ds3::Register::OUT_TEMP_L), data, sizeof(data))) {
+        return false;
+    }
+
+    int16_t raw = static_cast<int16_t>((data[1] << 8) | data[0]);
+    out_temp_c = static_cast<float>(raw) / 256.0f + 25.0f;
+
+    return true;
+}
+
 // --- 3. Motion Detection ---
 bool Lsm6ds3::configure_motion_detection(uint8_t tap_ths, uint8_t wakeup_ths, uint8_t freefall_ths,
                                         uint8_t ff_dur) {

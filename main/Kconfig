@@ -1,3 +1,13 @@
+config APP_BUILD_RAW_LOGGER
+    bool "Build raw IMU logger binary instead of monitoring app"
+    default n
+    help
+        When enabled, compiles a standalone raw IMU data logger (raw_logger_main.cpp)
+        instead of the main monitoring application. The logger writes raw accelerometer,
+        gyroscope, and temperature samples to SD card in CSV format with no processing.
+
+        Disable this to build the normal monitoring application.
+
 menu "Application Storage"
 
 choice APP_SD_INTERFACE
@@ -33,9 +43,31 @@ config APP_VERIFY_MQTT_TOPIC
         The topic will be "ranting/{node_id}/verify" where node_id is
         resolved from Kconfig, NVS, or auto-generation.
 
-config APP_VERIFY_MONITOR_TIMEOUT_MS
+    config APP_VERIFY_MONITOR_TIMEOUT_MS
     int "Monitor verify timeout (ms)"
     default 5000
     range 100 600000
+
+endmenu
+
+menu "Raw IMU Logger"
+    depends on APP_BUILD_RAW_LOGGER
+
+    config RAW_LOGGER_IMU_RATE_HZ
+        int "IMU sampling rate (Hz)"
+        default 26
+        range 26 208
+        help
+            LSM6DS3 output data rate for raw logging. Valid values: 26, 52, 104, 208 Hz.
+            Higher rates produce larger CSV files (~90 bytes/row).
+
+    config RAW_LOGGER_DURATION_S
+        int "Recording duration (seconds, 0 = indefinite)"
+        default 0
+        range 0 86400
+        help
+            Number of seconds to record before stopping. Set to 0 for indefinite recording
+            until power is removed. Duration is approximate based on sample count
+            (duration_s * rate_hz samples).
 
 endmenu
