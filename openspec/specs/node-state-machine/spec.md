@@ -21,36 +21,34 @@ The node SHALL initialize in the `IDLE` state upon startup, maintaining a short 
 - **THEN** no `FREE_DECAY` state SHALL exist in the FSM
 
 ### Requirement: Transition to DISTURBED
-The node SHALL transition to the `DISTURBED` state based on short-term accelerometer error variance, provided a baseline accel_err variance is available. The transition threshold SHALL be `max(accel_err_baseline_var × K_HIGH, K_ABS_MIN_ACCEL_VAR)`.
+The node SHALL transition to the DISTURBED state when the Chebyshev HPF magnitude of calibrated accelerometer data exceeds a fixed threshold, after the HPF settle period is complete. No baseline variance is required. No K_HIGH/K_LOW multipliers are used.
 
-#### Scenario: Accel Error Variance Exceeds Threshold
-- **WHEN** the node is in the `IDLE` state
-- **WHEN** a valid previous 5-minute window accel_err baseline variance is available
-- **WHEN** the live accel_err_var of the short buffer exceeds `max(accel_err_baseline_var × K_HIGH, K_ABS_MIN_ACCEL_VAR)`
-- **THEN** the state transitions to `DISTURBED`
-- **THEN** the short buffer is appended (via `std::copy` or loop, without dynamic allocation) to the 5-minute fixed-size ring buffer
+#### Scenario: HPF Magnitude Exceeds Threshold
+- **WHEN** the node is in the IDLE state
+- **WHEN** the HPF settle period is complete
+- **WHEN** the HPF magnitude `sqrt(hpf_x² + hpf_y² + hpf_z²)` exceeds `CONFIG_MONITOR_HPF_THRESHOLD_X1000 / 1000.0` g
+- **THEN** the state transitions to DISTURBED immediately
+- **THEN** the short buffer is appended to the 5-minute fixed-size ring buffer
 
-#### Scenario: Variance Below Absolute Floor Despite Relative Threshold
-- **WHEN** the node is in the `IDLE` state
-- **WHEN** baseline accel_err variance is near-zero
-- **WHEN** the live accel_err_var exceeds `accel_err_baseline_var × K_HIGH` but is below `K_ABS_MIN_ACCEL_VAR`
-- **THEN** the node SHALL NOT transition to `DISTURBED`
-- **THEN** the node remains in `IDLE`
+#### Scenario: HPF Magnitude Below Threshold
+- **WHEN** the node is in the IDLE state
+- **WHEN** the HPF magnitude is below the threshold
+- **THEN** the node SHALL remain in IDLE
 
 ### Requirement: Parameter Calculation and Return to IDLE
-The node SHALL perform heavy calculations and send data immediately upon leaving the `DISTURBED` state. DISTURBED SHALL return directly to IDLE. On exit from DISTURBED, post-hoc decay analysis SHALL run on the stored DISTURBED buffer.
+The node SHALL perform heavy calculations and send data immediately upon leaving the DISTURBED state. DISTURBED SHALL return directly to IDLE. On exit from DISTURBED, post-hoc decay analysis SHALL run on the stored DISTURBED buffer.
 
 #### Scenario: Disturbance subsides
-- **WHEN** the node is in the `DISTURBED` state
-- **WHEN** the accel_err_var of the short buffer drops below `max(accel_err_baseline_var × K_LOW, K_ABS_MIN_ACCEL_VAR)` for `CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE` consecutive samples
-- **THEN** the state transitions directly to `IDLE`
+- **WHEN** the node is in the DISTURBED state
+- **WHEN** the HPF magnitude drops below `CONFIG_MONITOR_HPF_THRESHOLD_X1000 / 1000.0` g for `CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE` consecutive samples
+- **THEN** the state transitions directly to IDLE
 - **THEN** sway statistics (pp_max, pp_mean) from the DISTURBED buffer SHALL be published
 - **THEN** post-hoc decay analysis (FFT + damping) SHALL be triggered on the stored DISTURBED buffer
 
 #### Scenario: No intermediate FREE_DECAY state
-- **WHEN** the node is in the `DISTURBED` state
+- **WHEN** the node is in the DISTURBED state
 - **WHEN** the disturbance subsides
-- **THEN** the node SHALL transition directly to `IDLE`
+- **THEN** the node SHALL transition directly to IDLE
 - **THEN** the node SHALL NOT pass through any intermediate state
 
 ### Requirement: DISTURBED Buffer Refresh
@@ -62,15 +60,6 @@ The node SHALL prevent buffer overflow during prolonged disturbances by refreshi
 - **THEN** sway statistics (pp_max, pp_mean) SHALL be calculated from the current `DISTURBED` buffer and sent immediately
 - **THEN** the node immediately resets the buffer to continue accumulating in `DISTURBED`
 
-### Requirement: Absolute Minimum Variance Configuration
-The absolute minimum variance floor (`K_ABS_MIN_ACCEL_VAR`) SHALL be configurable via Kconfig as a scaled integer (`CONFIG_MONITOR_ABS_MIN_ACCEL_VAR_X1000000`).
-- The default value SHALL be 100 (representing 0.0001 g²).
-- The Kconfig parameter SHALL use the x1000000 scaling convention.
-
-#### Scenario: Configuration Applied at Runtime
-- **WHEN** the monitor initializes
-- **THEN** the absolute minimum accel error variance floor is computed as `CONFIG_MONITOR_ABS_MIN_ACCEL_VAR_X1000000 / 1000000.0f`
-- **THEN** this value is used in all state transition threshold comparisons
 
 ### Requirement: Sway Statistics Spanning DISTURBED and FREE_DECAY
 Sway peak-to-peak statistics (`pp_max` and `pp_mean`) SHALL be computed over the entire `DISTURBED` buffer only. No `FREE_DECAY` span is included.
@@ -101,20 +90,20 @@ The `MonitorResult` struct SHALL include a `state` field indicating which FSM st
 - **THEN** the MonitorResult `state` field SHALL be `DISTURBED`
 
 ### Requirement: DISTURBED Exit Debounce
-The node SHALL require N consecutive samples below `max(accel_err_baseline_var × K_LOW, K_ABS_MIN_ACCEL_VAR)` before transitioning DISTURBED→IDLE. The debounce count SHALL be configurable via Kconfig (`CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE`), default 64 samples.
+The node SHALL require N consecutive samples below the HPF threshold before transitioning DISTURBED to IDLE. The debounce count SHALL be configurable via Kconfig (`CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE`), default 64 samples.
 
 #### Scenario: Debounce met
-- **WHEN** the node is in the `DISTURBED` state
-- **WHEN** `accel_err_var` remains below `max(accel_err_baseline_var × K_LOW, K_ABS_MIN_ACCEL_VAR)` for 64 consecutive samples
-- **THEN** the state SHALL transition to `IDLE`
+- **WHEN** the node is in the DISTURBED state
+- **WHEN** HPF magnitude remains below `CONFIG_MONITOR_HPF_THRESHOLD_X1000 / 1000.0` g for 64 consecutive samples
+- **THEN** the state SHALL transition to IDLE
 - **THEN** post-hoc decay analysis SHALL be triggered
 
 #### Scenario: Debounce reset on spike
-- **WHEN** the node is in the `DISTURBED` state
-- **WHEN** `accel_err_var` drops below the threshold for 50 consecutive samples
-- **WHEN** `accel_err_var` then exceeds the threshold on the 51st sample
+- **WHEN** the node is in the DISTURBED state
+- **WHEN** HPF magnitude drops below the threshold for 50 consecutive samples
+- **WHEN** HPF magnitude then exceeds the threshold on the 51st sample
 - **THEN** the debounce counter SHALL reset to zero
-- **THEN** the node SHALL remain in `DISTURBED`
+- **THEN** the node SHALL remain in DISTURBED
 
 #### Scenario: Kconfig default
 - **WHEN** `CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE` is not explicitly set

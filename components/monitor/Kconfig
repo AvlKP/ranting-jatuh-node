@@ -9,7 +9,7 @@ config MONITOR_STORAGE_MINUTES
 
 config MONITOR_IMU_RATE_HZ
     int "IMU sampling rate (Hz)"
-    default 26
+    default 52
     range 1 208
     help
         Target IMU sampling rate in Hz for monitor processing loop.
@@ -48,6 +48,38 @@ config MONITOR_PEAK_MIN_SPACING_SAMPLES
     range 1 500
     help
         Minimum sample spacing between peaks for sway and damping detection.
+
+config MONITOR_CENTERLINE_MIN_AMPLITUDE_X100
+    int "Centerline pair min amplitude (deg x100)"
+    default 5
+    range 1 9000
+    help
+        Minimum half peak-to-peak amplitude in degrees (scaled by 100) for
+        centerline modal analysis.
+
+config MONITOR_CENTERLINE_LOBE_REVERSAL_X100
+    int "Centerline lobe reversal threshold (deg x100)"
+    default 10
+    range 1 9000
+    help
+        Minimum opposite-extrema reversal in degrees (scaled by 100) before
+        lobe collapse starts a new peak/trough lobe.
+
+config MONITOR_MODAL_FREQ_MIN_HZ_X10
+    int "Modal FFT minimum frequency (Hz x10)"
+    default 5
+    range 0 1000
+    help
+        Minimum non-DC FFT frequency in Hz (scaled by 10) eligible for modal
+        natural-frequency selection.
+
+config MONITOR_MODAL_FREQ_MAX_HZ_X10
+    int "Modal FFT maximum frequency (Hz x10)"
+    default 250
+    range 1 2000
+    help
+        Maximum FFT frequency in Hz (scaled by 10) eligible for modal
+        natural-frequency selection.
 
 config MONITOR_FREEFALL_THS
     int "Free-fall threshold (raw)"
@@ -125,33 +157,29 @@ config MONITOR_N_DPAD
     help
         Number of samples before the 5-min buffer is full at which the buffer will be refreshed during a prolonged DISTURBED state.
 
-config MONITOR_K_HIGH_X100
-    int "IDLE to DISTURBED accel error threshold multiplier (x100)"
-    default 150
-    range 100 1000
+config MONITOR_HPF_THRESHOLD_X1000
+    int "Chebyshev HPF disturbance threshold (g x1000)"
+    default 20
+    range 1 1000
     help
-        Multiplier (scaled by 100) for baseline accel error variance. E.g., 150 means accel_err variance must exceed 1.5x of the baseline.
+        HPF magnitude threshold for disturbance detection (scaled by 1000).
+        E.g., 20 means 0.020 g. Applied to root-mean-square of all three axes.
 
-config MONITOR_K_LOW_X100
-    int "DISTURBED to IDLE accel error threshold multiplier (x100)"
-    default 110
-    range 50 1000
+config MONITOR_HPF_SETTLE_SAMPLES
+    int "Chebyshev HPF settle period (samples)"
+    default 500
+    range 0 5000
     help
-        Multiplier (scaled by 100) for baseline accel error variance. E.g., 110 means accel_err variance must drop below 1.1x of the baseline.
+        Number of samples to suppress disturbance detection at startup to
+        allow HPF transient to decay.
 
-config MONITOR_ACCEL_ERR_SHORT_BUF_SIZE
-    int "Accelerometer error short buffer size"
-    default 256
-    range 10 1024
+config MONITOR_IMU_CALIBRATION
+    bool "Enable IMU bias calibration"
+    default y
     help
-        Size of the short buffer to compute accelerometer error variance.
-
-config MONITOR_ABS_MIN_ACCEL_VAR_X1000000
-    int "Absolute minimum accelerometer error variance floor (x1000000)"
-    default 100
-    range 1 1000000
-    help
-        Absolute minimum accelerometer error variance floor (scaled by 1000000). E.g., 100 means floor is 0.0001 g^2.
+        When enabled, static accel/gyro biases are read from NVS and subtracted
+        from raw IMU values before filter processing. Biases default to zero if
+        NVS key missing.
 
 config MONITOR_DISTURBED_EXIT_DEBOUNCE
     int "DISTURBED to IDLE exit debounce count (samples)"

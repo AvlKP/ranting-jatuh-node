@@ -8,3 +8,4 @@ managed_components/
 .gemini/
 sdkconfig*
 .agent/
+logs/

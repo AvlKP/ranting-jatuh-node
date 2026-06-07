@@ -101,6 +101,9 @@ Key Kconfig options (run `idf.py menuconfig`):
 - Wind/storm state to trigger sway and damping ratio calculation
 - IMU FIFO usage to reduce awake time
 - Temperature calibration on IMU
+- Fix 0.01 deg sensor drift
+- Check for conditions when disturbance occur before taring and before baseline
+- Fix FFT and damping ratio calculation
 
 ## MQTT Topics
 

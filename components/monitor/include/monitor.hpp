@@ -5,8 +5,11 @@
 #include <cstdint>
 #include <mutex>
 #include "sdkconfig.h"
+#include "nvs.h"
 #include "lsm6ds3.hpp"
-#include "complementary_filter.hpp"
+#include "adaptive_complementary_filter.hpp"
+#include "calibration.hpp"
+#include "chebyshev_hpf.hpp"
 #include "monitor_events.hpp"
 
 namespace monitor {
@@ -31,12 +34,17 @@ struct StreamSample {
 };
 
 struct MonitorConfig {
-    float filter_alpha{0.98f};
+    float filter_alpha_base{0.98f};
+    float filter_k_gain{50.0f};
     std::int32_t ae_gpio_pin{-1};
     std::int32_t ae_adc_channel{-1};
     int ae_adc_threshold{CONFIG_MONITOR_AE_ADC_THRESHOLD};
     float peak_min_amplitude_deg{static_cast<float>(CONFIG_MONITOR_PEAK_MIN_AMPLITUDE_X10) / 10.0f};
     std::size_t peak_min_spacing{static_cast<std::size_t>(CONFIG_MONITOR_PEAK_MIN_SPACING_SAMPLES)};
+    float centerline_min_amplitude_deg{static_cast<float>(CONFIG_MONITOR_CENTERLINE_MIN_AMPLITUDE_X100) / 100.0f};
+    float centerline_lobe_reversal_deg{static_cast<float>(CONFIG_MONITOR_CENTERLINE_LOBE_REVERSAL_X100) / 100.0f};
+    float modal_freq_min_hz{static_cast<float>(CONFIG_MONITOR_MODAL_FREQ_MIN_HZ_X10) / 10.0f};
+    float modal_freq_max_hz{static_cast<float>(CONFIG_MONITOR_MODAL_FREQ_MAX_HZ_X10) / 10.0f};
 };
 
 enum class NodeState : std::uint8_t {
@@ -97,7 +105,7 @@ public:
 private:
     [[nodiscard]] bool ReadImu(sensor::lsm6ds3::Value& gyro,
                                sensor::lsm6ds3::Value& accel) noexcept;
-    void PushSample(float roll, float pitch, float ax, float ay, float az) noexcept;
+    void PushSample(float roll, float pitch, float hpf_magnitude) noexcept;
     [[nodiscard]] bool ComputeAndPublish(NodeState pub_state, bool is_exit = true) noexcept;
     [[nodiscard]] bool ComputeStats(MonitorResult& result) const noexcept;
     [[nodiscard]] bool ComputeNaturalFrequency(MonitorResult& result) noexcept;
@@ -114,14 +122,64 @@ private:
         std::array<float, kMaxPeaks> times{};
         std::size_t count{0U};
     };
+    enum class ExtremaKind : std::uint8_t {
+        Peak = 0U,
+        Trough = 1U
+    };
+    struct ExtremaPoint {
+        std::size_t logical_index{0U};
+        float value{0.0f};
+        ExtremaKind kind{ExtremaKind::Peak};
+    };
+    struct ExtremaList {
+        static constexpr std::size_t kMaxExtrema = PeakList::kMaxPeaks;
+        std::array<ExtremaPoint, kMaxExtrema> points{};
+        std::size_t count{0U};
+    };
+    struct CenterlinePair {
+        std::size_t center_logical_index{0U};
+        float center_value{0.0f};
+        float amplitude{0.0f};
+        float time_s{0.0f};
+    };
+    struct CenterlinePairList {
+        static constexpr std::size_t kMaxPairs = PeakList::kMaxPeaks;
+        std::array<CenterlinePair, kMaxPairs> pairs{};
+        std::size_t count{0U};
+    };
+    struct FftBinRange {
+        std::size_t min_bin{0U};
+        std::size_t max_bin{0U};
+        bool valid{false};
+    };
+    struct ModalAxisResult {
+        DecayRegion decay{};
+        ExtremaList raw_extrema{};
+        ExtremaList collapsed_extrema{};
+        CenterlinePairList centerline_pairs{};
+        PeakList pair_envelope{};
+        std::size_t residual_count{0U};
+        float natural_freq_hz{0.0f};
+        float damping_ratio{0.0f};
+    };
     [[nodiscard]] DecayRegion FindDecayRegion(const std::array<float, kStorageSamples>& data, PeakList& out_peaks) const noexcept;
     [[nodiscard]] float ComputeDampingRegression(const PeakList& peaks, float natural_freq_hz) const noexcept;
+    [[nodiscard]] bool DetectRawExtrema(const std::array<float, kStorageSamples>& data, std::size_t start_logical,
+                                        std::size_t count, ExtremaList& out_extrema) const noexcept;
+    [[nodiscard]] bool CollapseExtremaLobes(const ExtremaList& raw_extrema, ExtremaList& out_extrema) const noexcept;
+    [[nodiscard]] bool BuildCenterlinePairs(const ExtremaList& extrema, CenterlinePairList& out_pairs) const noexcept;
+    [[nodiscard]] bool SubtractCenterline(const std::array<float, kStorageSamples>& data, std::size_t start_logical,
+                                          std::size_t count, const CenterlinePairList& pairs) noexcept;
+    [[nodiscard]] bool SelectPairEnvelope(const CenterlinePairList& pairs, PeakList& out_envelope) const noexcept;
+    [[nodiscard]] FftBinRange SelectFftBinRange(std::size_t fft_size, float sample_rate_hz) const noexcept;
+    [[nodiscard]] float ComputeResidualNaturalFrequency(const float* residual, std::size_t count) noexcept;
+    [[nodiscard]] ModalAxisResult AnalyzeModalAxis(const std::array<float, kStorageSamples>& data) noexcept;
 
 #if CONFIG_MONITOR_DEBUG_DUMP
-    void DumpDebugToSD(const DecayRegion& roll_decay, const DecayRegion& pitch_decay,
-                       const PeakList& roll_peaks, const PeakList& pitch_peaks,
+    void DumpDebugToSD(const ModalAxisResult& roll_modal, const ModalAxisResult& pitch_modal,
                        float freq_roll_hz, float freq_pitch_hz,
-                       float zeta_roll, float zeta_pitch) noexcept;
+                       float zeta_roll, float zeta_pitch,
+                       std::int64_t modal_elapsed_us) noexcept;
 #endif
 
     void CheckFailureEvents() noexcept;
@@ -132,8 +190,10 @@ private:
     [[nodiscard]] std::size_t PhysicalIndex(std::size_t logical_index) const noexcept;
 
     sensor::Lsm6ds3 imu_;
-    filter::Complementary filter_;
+    filter::AdaptiveComplementary filter_;
     MonitorConfig config_;
+    calibration::CalibrationBias calib_bias_{};
+    nvs_handle_t calib_nvs_handle_{0};
 
     mutable std::mutex mutex_;
     void* task_handle_{nullptr};
@@ -154,17 +214,8 @@ private:
     float pitch_short_sum_{0.0f};
     float pitch_short_sq_sum_{0.0f};
 
-    static constexpr std::size_t kAccelErrShortBufferSamples = static_cast<std::size_t>(CONFIG_MONITOR_ACCEL_ERR_SHORT_BUF_SIZE);
-    std::array<float, kAccelErrShortBufferSamples> accel_err_short_{};
-    std::size_t accel_err_short_write_index_{0U};
-    std::size_t accel_err_short_sample_count_{0U};
-    float accel_err_short_sum_{0.0f};
-    float accel_err_short_sq_sum_{0.0f};
-    float accel_err_baseline_var_{0.0f};
-    bool has_accel_err_baseline_{false};
-    float baseline_accum_sum_{0.0f};
-    float baseline_accum_sq_sum_{0.0f};
-    std::size_t baseline_sample_count_{0U};
+    ChebyshevHpf hpf_{};
+    float hpf_settle_counter_{0.0f};
 
     std::size_t disturbed_exit_debounce_counter_{0U};
 
@@ -186,6 +237,7 @@ private:
     std::array<float, kFftWindowSamples / 2U> psd_accum_{};
     PeakList roll_peaks_{};
     PeakList pitch_peaks_{};
+    std::array<float, kStorageSamples> residual_scratch_{};
     bool fft_initialized_{false};
 
     void* adc_handle_{nullptr};

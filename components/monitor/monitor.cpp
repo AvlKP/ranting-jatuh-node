@@ -44,7 +44,7 @@ static_assert(kStorageSamples >= kFftWindowSamples,
 Monitor::Monitor(const sensor::Lsm6ds3::Config& imu_config,
                  const MonitorConfig& config) noexcept
     : imu_{imu_config},
-      filter_{config.filter_alpha},
+      filter_{config.filter_alpha_base, config.filter_k_gain},
       config_{config} {}
 
 bool Monitor::Init() noexcept {
@@ -112,6 +112,17 @@ bool Monitor::Init() noexcept {
 
     fft_initialized_ = true;
 
+#if CONFIG_MONITOR_IMU_CALIBRATION
+    {
+        esp_err_t nvs_err = nvs_open("calib", NVS_READONLY, &calib_nvs_handle_);
+        if (nvs_err == ESP_OK) {
+            calibration::Calibration::ReadBiases(calib_nvs_handle_, calib_bias_);
+            nvs_close(calib_nvs_handle_);
+            calib_nvs_handle_ = 0;
+        }
+    }
+#endif
+
 #if CONFIG_MONITOR_TARE_ENABLE
     taring_complete_ = false;
 #else
@@ -166,8 +177,16 @@ bool Monitor::Update(float dt_s) noexcept {
         return false;
     }
 
-    const std::array<float, 3> accel_vec{accel.x, accel.y, accel.z};
-    const std::array<float, 3> gyro_vec{gyro.x, gyro.y, gyro.z};
+    const float calib_ax = accel.x - calib_bias_.ax;
+    const float calib_ay = accel.y - calib_bias_.ay;
+    const float calib_az = accel.z - calib_bias_.az;
+    const float calib_gx = gyro.x - calib_bias_.gx;
+    const float calib_gy = gyro.y - calib_bias_.gy;
+    const float calib_gz = gyro.z - calib_bias_.gz;
+
+    const std::array<float, 3> accel_vec{calib_ax, calib_ay, calib_az};
+    const std::array<float, 3> gyro_vec{calib_gx, calib_gy, calib_gz};
+    hpf_.update(calib_ax, calib_ay, calib_az);
     filter_.update(accel_vec, gyro_vec, dt_s);
 
     float current_roll = filter_.roll();
@@ -207,7 +226,7 @@ bool Monitor::Update(float dt_s) noexcept {
     }
 #endif
 
-    PushSample(current_roll, current_pitch, accel.x, accel.y, accel.z);
+    PushSample(current_roll, current_pitch, hpf_.magnitude());
 
     ESP_LOGD(kTag, "Raw stream: ax=%.3f ay=%.3f az=%.3f gx=%.3f gy=%.3f gz=%.3f r=%.3f p=%.3f",
              accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z, current_roll, current_pitch);
@@ -241,17 +260,6 @@ bool Monitor::Update(float dt_s) noexcept {
                 idle_5min_roll_var_ = result.roll_variance;
                 idle_5min_pitch_var_ = result.pitch_variance;
                 has_baseline_variance_ = true;
-
-                // Calculate baseline accel error variance
-                if (baseline_sample_count_ > 1U) {
-                    const float n = static_cast<float>(baseline_sample_count_);
-                    accel_err_baseline_var_ = (baseline_accum_sq_sum_ - (baseline_accum_sum_ * baseline_accum_sum_) / n) / (n - 1.0f);
-                    if (accel_err_baseline_var_ < 0.0f) accel_err_baseline_var_ = 0.0f;
-                    has_accel_err_baseline_ = true;
-                }
-                baseline_accum_sum_ = 0.0f;
-                baseline_accum_sq_sum_ = 0.0f;
-                baseline_sample_count_ = 0U;
                 
                 // For IDLE, we only want to publish the tilt statistics (mean, variance).
                 // Zero out the rest to avoid DC bias in dashboard/logger.
@@ -272,8 +280,8 @@ bool Monitor::Update(float dt_s) noexcept {
                                sizeof(result),
                                0);
                 
-                ESP_LOGI(kTag, "IDLE baseline updated. roll_var=%.3f pitch_var=%.3f accel_err_baseline_var=%.6f",
-                         idle_5min_roll_var_, idle_5min_pitch_var_, accel_err_baseline_var_);
+                ESP_LOGI(kTag, "IDLE baseline updated. roll_var=%.3f pitch_var=%.3f",
+                         idle_5min_roll_var_, idle_5min_pitch_var_);
             }
         }
     }
@@ -291,10 +299,9 @@ bool Monitor::ReadImu(sensor::lsm6ds3::Value& gyro,
     return imu_.read_accel_gyro(gyro, accel);
 }
 
-void Monitor::PushSample(float roll, float pitch, float ax, float ay, float az) noexcept {
+void Monitor::PushSample(float roll, float pitch, float hpf_magnitude) noexcept {
     std::lock_guard<std::mutex> lock(mutex_);
 
-    // 1. Maintain roll/pitch short buffer and rolling sums
     if (short_sample_count_ == kShortBufferSamples) {
         const float old_roll = roll_short_[short_write_index_];
         const float old_pitch = pitch_short_[short_write_index_];
@@ -315,44 +322,19 @@ void Monitor::PushSample(float roll, float pitch, float ax, float ay, float az) 
 
     short_write_index_ = (short_write_index_ + 1U) % kShortBufferSamples;
 
-    // 2. Compute raw accel error and update its short buffer
-    const float accel_err = std::abs(std::sqrt(ax * ax + ay * ay + az * az) - 1.0f);
+    const float hpf_threshold = static_cast<float>(CONFIG_MONITOR_HPF_THRESHOLD_X1000) / 1000.0f;
 
-    if (accel_err_short_sample_count_ == kAccelErrShortBufferSamples) {
-        const float old_val = accel_err_short_[accel_err_short_write_index_];
-        accel_err_short_sum_ -= old_val;
-        accel_err_short_sq_sum_ -= (old_val * old_val);
-    } else {
-        ++accel_err_short_sample_count_;
+    if (hpf_settle_counter_ < static_cast<float>(CONFIG_MONITOR_HPF_SETTLE_SAMPLES)) {
+        hpf_settle_counter_ += 1.0f;
+
+        roll_history_[write_index_] = roll;
+        pitch_history_[write_index_] = pitch;
+        write_index_ = (write_index_ + 1U) % kStorageSamples;
+        if (sample_count_ < kStorageSamples) {
+            ++sample_count_;
+        }
+        return;
     }
-
-    accel_err_short_[accel_err_short_write_index_] = accel_err;
-    accel_err_short_sum_ += accel_err;
-    accel_err_short_sq_sum_ += (accel_err * accel_err);
-    accel_err_short_write_index_ = (accel_err_short_write_index_ + 1U) % kAccelErrShortBufferSamples;
-
-    // Compute live O(1) variance of accel error
-    float accel_err_var = 0.0f;
-    if (accel_err_short_sample_count_ > 1U) {
-        const float n = static_cast<float>(accel_err_short_sample_count_);
-        accel_err_var = (accel_err_short_sq_sum_ - (accel_err_short_sum_ * accel_err_short_sum_) / n) / (n - 1.0f);
-        if (accel_err_var < 0.0f) accel_err_var = 0.0f;
-    }
-
-    // Accumulate baseline sums during IDLE
-    if (state_ == NodeState::IDLE) {
-        baseline_accum_sum_ += accel_err;
-        baseline_accum_sq_sum_ += (accel_err * accel_err);
-        baseline_sample_count_++;
-    }
-
-    // 3. FSM State Transitions
-    const float abs_min_var = static_cast<float>(CONFIG_MONITOR_ABS_MIN_ACCEL_VAR_X1000000) / 1000000.0f;
-    const float k_high = static_cast<float>(CONFIG_MONITOR_K_HIGH_X100) / 100.0f;
-    const float k_low = static_cast<float>(CONFIG_MONITOR_K_LOW_X100) / 100.0f;
-
-    const float threshold_high = std::max(accel_err_baseline_var_ * k_high, abs_min_var);
-    const float threshold_low = std::max(accel_err_baseline_var_ * k_low, abs_min_var);
 
     if (state_ == NodeState::IDLE) {
         roll_history_[write_index_] = roll;
@@ -362,28 +344,25 @@ void Monitor::PushSample(float roll, float pitch, float ax, float ay, float az) 
             ++sample_count_;
         }
 
-        if (has_accel_err_baseline_ && accel_err_short_sample_count_ == kAccelErrShortBufferSamples) {
-            if (accel_err_var > threshold_high) {
-                state_ = NodeState::DISTURBED;
-                
-                // Copy short buffer roll/pitch to start of history as pre-roll
-                write_index_ = 0U;
-                sample_count_ = 0U;
-                
-                const std::size_t count = short_sample_count_;
-                for (std::size_t i = 0U; i < count; ++i) {
-                    const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
-                    roll_history_[i] = roll_short_[idx];
-                    pitch_history_[i] = pitch_short_[idx];
-                }
-                write_index_ = count;
-                sample_count_ = count;
-                
-                disturbed_exit_debounce_counter_ = 0U;
-                
-                ESP_LOGI(kTag, "Transition: IDLE -> DISTURBED (accel_err_var=%.6f > th=%.6f)",
-                         accel_err_var, threshold_high);
+        if (hpf_magnitude > hpf_threshold) {
+            state_ = NodeState::DISTURBED;
+
+            write_index_ = 0U;
+            sample_count_ = 0U;
+
+            const std::size_t count = short_sample_count_;
+            for (std::size_t i = 0U; i < count; ++i) {
+                const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
+                roll_history_[i] = roll_short_[idx];
+                pitch_history_[i] = pitch_short_[idx];
             }
+            write_index_ = count;
+            sample_count_ = count;
+
+            disturbed_exit_debounce_counter_ = 0U;
+
+            ESP_LOGI(kTag, "Transition: IDLE -> DISTURBED (hpf_magnitude=%.6f > th=%.6f)",
+                     static_cast<double>(hpf_magnitude), static_cast<double>(hpf_threshold));
         }
     } else if (state_ == NodeState::DISTURBED) {
         roll_history_[write_index_] = roll;
@@ -394,15 +373,15 @@ void Monitor::PushSample(float roll, float pitch, float ax, float ay, float az) 
         }
 
         bool transitioned = false;
-        if (accel_err_var < threshold_low) {
+        if (hpf_magnitude < hpf_threshold) {
             ++disturbed_exit_debounce_counter_;
             if (disturbed_exit_debounce_counter_ >= static_cast<std::size_t>(CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE)) {
                 state_ = NodeState::IDLE;
                 transitioned = true;
-                
-                ESP_LOGI(kTag, "Transition: DISTURBED -> IDLE (accel_err_var=%.6f < th=%.6f)",
-                         accel_err_var, threshold_low);
-                
+
+                ESP_LOGI(kTag, "Transition: DISTURBED -> IDLE (hpf_magnitude=%.6f < th=%.6f)",
+                         static_cast<double>(hpf_magnitude), static_cast<double>(hpf_threshold));
+
                 static_cast<void>(ComputeAndPublish(NodeState::DISTURBED, true));
             }
         } else {
@@ -412,10 +391,10 @@ void Monitor::PushSample(float roll, float pitch, float ax, float ay, float az) 
         if (!transitioned && sample_count_ >= (kStorageSamples - static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD))) {
             static_cast<void>(ComputeAndPublish(NodeState::DISTURBED, false));
             ESP_LOGI(kTag, "DISTURBED Buffer Refreshed");
-            
+
             write_index_ = 0U;
             sample_count_ = 0U;
-            
+
             const std::size_t count = short_sample_count_;
             for (std::size_t i = 0U; i < count; ++i) {
                 const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
@@ -443,22 +422,29 @@ bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
     if (pub_state == NodeState::DISTURBED) {
         static_cast<void>(ComputeSwayAndDamping(result));
         if (is_exit) {
-            roll_peaks_ = PeakList{};
-            pitch_peaks_ = PeakList{};
-            DecayRegion roll_decay = FindDecayRegion(roll_history_, roll_peaks_);
-            DecayRegion pitch_decay = FindDecayRegion(pitch_history_, pitch_peaks_);
-            
-            result.natural_freq_roll_hz = ComputeAxisNaturalFrequency(roll_history_, roll_decay.start_index, roll_decay.count);
-            result.natural_freq_pitch_hz = ComputeAxisNaturalFrequency(pitch_history_, pitch_decay.start_index, pitch_decay.count);
+#if CONFIG_MONITOR_DEBUG_DUMP
+            const std::int64_t modal_start_us = esp_timer_get_time();
+#endif
+            ModalAxisResult roll_modal = AnalyzeModalAxis(roll_history_);
+            ModalAxisResult pitch_modal = AnalyzeModalAxis(pitch_history_);
+
+            result.natural_freq_roll_hz = roll_modal.natural_freq_hz;
+            result.natural_freq_pitch_hz = pitch_modal.natural_freq_hz;
             result.natural_freq_hz = std::max(result.natural_freq_roll_hz, result.natural_freq_pitch_hz);
-            
-            result.roll_damping_ratio = ComputeDampingRegression(roll_peaks_, result.natural_freq_roll_hz);
-            result.pitch_damping_ratio = ComputeDampingRegression(pitch_peaks_, result.natural_freq_pitch_hz);
+
+            result.roll_damping_ratio = roll_modal.damping_ratio;
+            result.pitch_damping_ratio = pitch_modal.damping_ratio;
 
 #if CONFIG_MONITOR_DEBUG_DUMP
-            DumpDebugToSD(roll_decay, pitch_decay, roll_peaks_, pitch_peaks_,
+            const std::int64_t modal_elapsed_us = esp_timer_get_time() - modal_start_us;
+            ESP_LOGI(kTag, "Modal analysis elapsed=%lldus roll_pairs=%u pitch_pairs=%u",
+                     static_cast<long long>(modal_elapsed_us),
+                     static_cast<unsigned>(roll_modal.centerline_pairs.count),
+                     static_cast<unsigned>(pitch_modal.centerline_pairs.count));
+            DumpDebugToSD(roll_modal, pitch_modal,
                           result.natural_freq_roll_hz, result.natural_freq_pitch_hz,
-                          result.roll_damping_ratio, result.pitch_damping_ratio);
+                          result.roll_damping_ratio, result.pitch_damping_ratio,
+                          modal_elapsed_us);
 #endif
         } else {
             result.natural_freq_roll_hz = 0.0f;
@@ -663,6 +649,379 @@ float Monitor::ComputeDampingRegression(const PeakList& peaks, float natural_fre
     return std::fabs(slope) / wn;
 }
 
+bool Monitor::DetectRawExtrema(const std::array<float, kStorageSamples>& data,
+                               std::size_t start_logical,
+                               std::size_t count,
+                               ExtremaList& out_extrema) const noexcept {
+    out_extrema.count = 0U;
+    const std::size_t buffer_count = BufferSize();
+    if ((count < 3U) || (start_logical >= buffer_count)) {
+        return false;
+    }
+
+    const std::size_t end_logical = std::min(start_logical + count, buffer_count);
+    std::size_t last_ext_idx = 0U;
+    bool has_last_ext = false;
+
+    for (std::size_t i = start_logical + 1U; i + 1U < end_logical; ++i) {
+        const float prev = data[PhysicalIndex(i - 1U)];
+        const float curr = data[PhysicalIndex(i)];
+        const float next = data[PhysicalIndex(i + 1U)];
+
+        const bool is_peak = (curr > prev) && (curr > next);
+        const bool is_trough = (curr < prev) && (curr < next);
+        if (!(is_peak || is_trough)) {
+            continue;
+        }
+
+        if (has_last_ext && ((i - last_ext_idx) < config_.peak_min_spacing)) {
+            continue;
+        }
+
+        if (out_extrema.count >= ExtremaList::kMaxExtrema) {
+            break;
+        }
+
+        ExtremaPoint& point = out_extrema.points[out_extrema.count];
+        point.logical_index = i;
+        point.value = curr;
+        point.kind = is_peak ? ExtremaKind::Peak : ExtremaKind::Trough;
+        ++out_extrema.count;
+        last_ext_idx = i;
+        has_last_ext = true;
+    }
+
+    return out_extrema.count > 0U;
+}
+
+bool Monitor::CollapseExtremaLobes(const ExtremaList& raw_extrema,
+                                   ExtremaList& out_extrema) const noexcept {
+    out_extrema.count = 0U;
+    if (raw_extrema.count == 0U) {
+        return false;
+    }
+
+    ExtremaPoint active = raw_extrema.points[0U];
+    for (std::size_t i = 1U; i < raw_extrema.count; ++i) {
+        const ExtremaPoint& curr = raw_extrema.points[i];
+        if (curr.kind == active.kind) {
+            const bool stronger_peak = (curr.kind == ExtremaKind::Peak) && (curr.value > active.value);
+            const bool stronger_trough = (curr.kind == ExtremaKind::Trough) && (curr.value < active.value);
+            if (stronger_peak || stronger_trough) {
+                active = curr;
+            }
+            continue;
+        }
+
+        if (std::fabs(curr.value - active.value) < config_.centerline_lobe_reversal_deg) {
+            continue;
+        }
+
+        if (out_extrema.count >= ExtremaList::kMaxExtrema) {
+            break;
+        }
+        out_extrema.points[out_extrema.count] = active;
+        ++out_extrema.count;
+        active = curr;
+    }
+
+    if (out_extrema.count < ExtremaList::kMaxExtrema) {
+        out_extrema.points[out_extrema.count] = active;
+        ++out_extrema.count;
+    }
+
+    return out_extrema.count > 0U;
+}
+
+bool Monitor::BuildCenterlinePairs(const ExtremaList& extrema,
+                                   CenterlinePairList& out_pairs) const noexcept {
+    out_pairs.count = 0U;
+    if (extrema.count < 2U) {
+        return false;
+    }
+
+    const float sample_rate_hz = static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    for (std::size_t i = 0U; i + 1U < extrema.count; ++i) {
+        const ExtremaPoint& left = extrema.points[i];
+        const ExtremaPoint& right = extrema.points[i + 1U];
+        if (left.kind == right.kind) {
+            continue;
+        }
+
+        const float amplitude = 0.5f * std::fabs(right.value - left.value);
+        if (amplitude < config_.centerline_min_amplitude_deg) {
+            continue;
+        }
+
+        if (out_pairs.count >= CenterlinePairList::kMaxPairs) {
+            break;
+        }
+
+        CenterlinePair& pair = out_pairs.pairs[out_pairs.count];
+        pair.center_logical_index = (left.logical_index + right.logical_index) / 2U;
+        pair.center_value = 0.5f * (left.value + right.value);
+        pair.amplitude = amplitude;
+        pair.time_s = static_cast<float>(pair.center_logical_index) / sample_rate_hz;
+        ++out_pairs.count;
+    }
+
+    return out_pairs.count > 0U;
+}
+
+bool Monitor::SubtractCenterline(const std::array<float, kStorageSamples>& data,
+                                 std::size_t start_logical,
+                                 std::size_t count,
+                                 const CenterlinePairList& pairs) noexcept {
+    if ((count == 0U) || (count > kStorageSamples) || (pairs.count < 2U)) {
+        return false;
+    }
+
+    std::size_t pair_idx = 0U;
+    for (std::size_t i = 0U; i < count; ++i) {
+        const std::size_t logical = start_logical + i;
+        while ((pair_idx + 1U) < pairs.count &&
+               logical > pairs.pairs[pair_idx + 1U].center_logical_index) {
+            ++pair_idx;
+        }
+
+        float center = pairs.pairs[pair_idx].center_value;
+        if ((pair_idx + 1U) < pairs.count &&
+            logical >= pairs.pairs[pair_idx].center_logical_index) {
+            const CenterlinePair& left = pairs.pairs[pair_idx];
+            const CenterlinePair& right = pairs.pairs[pair_idx + 1U];
+            const std::size_t span = right.center_logical_index - left.center_logical_index;
+            if (span > 0U) {
+                const float frac = static_cast<float>(logical - left.center_logical_index) /
+                                   static_cast<float>(span);
+                center = left.center_value + (right.center_value - left.center_value) * frac;
+            }
+        } else if (logical > pairs.pairs[pairs.count - 1U].center_logical_index) {
+            center = pairs.pairs[pairs.count - 1U].center_value;
+        }
+
+        residual_scratch_[i] = data[PhysicalIndex(logical)] - center;
+    }
+
+    return true;
+}
+
+bool Monitor::SelectPairEnvelope(const CenterlinePairList& pairs,
+                                 PeakList& out_envelope) const noexcept {
+    out_envelope.count = 0U;
+    if (pairs.count == 0U) {
+        return false;
+    }
+
+    std::size_t max_idx = 0U;
+    float max_amp = pairs.pairs[0U].amplitude;
+    for (std::size_t i = 1U; i < pairs.count; ++i) {
+        if (pairs.pairs[i].amplitude > max_amp) {
+            max_amp = pairs.pairs[i].amplitude;
+            max_idx = i;
+        }
+    }
+
+    float last_amp = max_amp;
+    for (std::size_t i = max_idx; i < pairs.count && out_envelope.count < PeakList::kMaxPeaks; ++i) {
+        const float amp = pairs.pairs[i].amplitude;
+        if (amp > last_amp) {
+            break;
+        }
+        out_envelope.amplitudes[out_envelope.count] = amp;
+        out_envelope.times[out_envelope.count] = pairs.pairs[i].time_s;
+        ++out_envelope.count;
+        last_amp = amp;
+    }
+
+    return out_envelope.count > 0U;
+}
+
+Monitor::FftBinRange Monitor::SelectFftBinRange(std::size_t fft_size,
+                                                float sample_rate_hz) const noexcept {
+    FftBinRange range{};
+    if ((fft_size < 4U) || (sample_rate_hz <= 0.0f) ||
+        (config_.modal_freq_max_hz < config_.modal_freq_min_hz)) {
+        return range;
+    }
+
+    const float fft_size_f = static_cast<float>(fft_size);
+    std::size_t min_bin = static_cast<std::size_t>(
+        std::ceil((config_.modal_freq_min_hz * fft_size_f) / sample_rate_hz));
+    std::size_t max_bin = static_cast<std::size_t>(
+        std::floor((config_.modal_freq_max_hz * fft_size_f) / sample_rate_hz));
+
+    const std::size_t max_valid_bin = (fft_size / 2U) - 1U;
+    min_bin = std::max<std::size_t>(min_bin, 1U);
+    max_bin = std::min(max_bin, max_valid_bin);
+    if (min_bin > max_bin) {
+        return range;
+    }
+
+    range.min_bin = min_bin;
+    range.max_bin = max_bin;
+    range.valid = true;
+    return range;
+}
+
+float Monitor::ComputeResidualNaturalFrequency(const float* residual, std::size_t count) noexcept {
+    if ((residual == nullptr) || (count == 0U)) {
+        return 0.0f;
+    }
+
+    const float sample_rate_hz = static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    if (count < kFftWindowSamples) {
+        const std::size_t fft_size = (count < 512U) ? 512U : 1024U;
+        const FftBinRange range = SelectFftBinRange(fft_size, sample_rate_hz);
+        if (!range.valid) {
+            return 0.0f;
+        }
+
+        std::fill(fft_input_.begin(), fft_input_.begin() + (fft_size * 2U), 0.0f);
+
+        float mean = 0.0f;
+#if CONFIG_MONITOR_FFT_DE_MEAN_ENABLE
+        float sum = 0.0f;
+        for (std::size_t i = 0U; i < count; ++i) {
+            sum += residual[i];
+        }
+        mean = sum / static_cast<float>(count);
+#endif
+
+        for (std::size_t i = 0U; i < count; ++i) {
+            const float val = residual[i] - mean;
+            const float window = (count > 1U) ?
+                (0.5f - 0.5f * std::cos(kTwoPi * static_cast<float>(i) / static_cast<float>(count - 1U))) :
+                1.0f;
+            fft_input_[2U * i] = val * window;
+            fft_input_[2U * i + 1U] = 0.0f;
+        }
+
+        if (dsps_fft2r_fc32(fft_input_.data(), static_cast<int>(fft_size)) != ESP_OK) {
+            return 0.0f;
+        }
+        if (dsps_bit_rev_fc32(fft_input_.data(), static_cast<int>(fft_size)) != ESP_OK) {
+            return 0.0f;
+        }
+
+        float max_val = 0.0f;
+        std::size_t max_bin = 0U;
+        for (std::size_t bin = range.min_bin; bin <= range.max_bin; ++bin) {
+            const float real = fft_input_[2U * bin];
+            const float imag = fft_input_[2U * bin + 1U];
+            const float power = (real * real) + (imag * imag);
+            if (power > max_val) {
+                max_val = power;
+                max_bin = bin;
+            }
+            if (fft_size == 512U) {
+                psd_accum_[2U * bin] += power;
+                psd_accum_[2U * bin + 1U] += power;
+            } else {
+                psd_accum_[bin] += power;
+            }
+        }
+
+        return (max_bin == 0U) ? 0.0f :
+            ((static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(fft_size));
+    }
+
+    const FftBinRange range = SelectFftBinRange(kFftWindowSamples, sample_rate_hz);
+    if (!range.valid) {
+        return 0.0f;
+    }
+
+    const std::size_t step = kFftWindowSamples - kFftOverlapSamples;
+    const std::size_t segments = ((count - kFftWindowSamples) / step) + 1U;
+    const std::size_t span = kFftWindowSamples + (segments - 1U) * step;
+    const std::size_t base_start = count - span;
+
+    std::array<float, kFftWindowSamples / 2U> local_psd{};
+    for (std::size_t seg = 0U; seg < segments; ++seg) {
+        const std::size_t seg_start = base_start + (seg * step);
+
+        float mean = 0.0f;
+#if CONFIG_MONITOR_FFT_DE_MEAN_ENABLE
+        float sum = 0.0f;
+        for (std::size_t i = 0U; i < kFftWindowSamples; ++i) {
+            sum += residual[seg_start + i];
+        }
+        mean = sum / static_cast<float>(kFftWindowSamples);
+#endif
+
+        for (std::size_t i = 0U; i < kFftWindowSamples; ++i) {
+            const float val = residual[seg_start + i] - mean;
+            const float window = 0.5f - 0.5f *
+                std::cos(kTwoPi * static_cast<float>(i) / static_cast<float>(kFftWindowSamples - 1U));
+            fft_input_[2U * i] = val * window;
+            fft_input_[2U * i + 1U] = 0.0f;
+        }
+
+        if (dsps_fft2r_fc32(fft_input_.data(), static_cast<int>(kFftWindowSamples)) != ESP_OK) {
+            return 0.0f;
+        }
+        if (dsps_bit_rev_fc32(fft_input_.data(), static_cast<int>(kFftWindowSamples)) != ESP_OK) {
+            return 0.0f;
+        }
+
+        for (std::size_t bin = range.min_bin; bin <= range.max_bin; ++bin) {
+            const float real = fft_input_[2U * bin];
+            const float imag = fft_input_[2U * bin + 1U];
+            const float power = (real * real) + (imag * imag);
+            local_psd[bin] += power;
+            psd_accum_[bin] += power;
+        }
+    }
+
+    const float norm = 1.0f / static_cast<float>(segments);
+    float max_val = 0.0f;
+    std::size_t max_bin = 0U;
+    for (std::size_t bin = range.min_bin; bin <= range.max_bin; ++bin) {
+        local_psd[bin] *= norm;
+        if (local_psd[bin] > max_val) {
+            max_val = local_psd[bin];
+            max_bin = bin;
+        }
+    }
+
+    return (max_bin == 0U) ? 0.0f :
+        ((static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(kFftWindowSamples));
+}
+
+Monitor::ModalAxisResult Monitor::AnalyzeModalAxis(const std::array<float, kStorageSamples>& data) noexcept {
+    ModalAxisResult result{};
+    const std::size_t count = BufferSize();
+    if (count < 3U) {
+        return result;
+    }
+
+    static_cast<void>(DetectRawExtrema(data, 0U, count, result.raw_extrema));
+    static_cast<void>(CollapseExtremaLobes(result.raw_extrema, result.collapsed_extrema));
+    static_cast<void>(BuildCenterlinePairs(result.collapsed_extrema, result.centerline_pairs));
+    static_cast<void>(SelectPairEnvelope(result.centerline_pairs, result.pair_envelope));
+
+    if (result.pair_envelope.count == 0U || result.centerline_pairs.count < 2U) {
+        return result;
+    }
+
+    const float first_time_s = result.pair_envelope.times[0U];
+    const std::size_t start_logical = static_cast<std::size_t>(
+        first_time_s * static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ));
+    if (start_logical >= count) {
+        return result;
+    }
+
+    result.decay.start_index = start_logical;
+    result.decay.count = count - start_logical;
+    if (!SubtractCenterline(data, result.decay.start_index, result.decay.count, result.centerline_pairs)) {
+        return result;
+    }
+
+    result.residual_count = result.decay.count;
+    result.natural_freq_hz = ComputeResidualNaturalFrequency(residual_scratch_.data(), result.residual_count);
+    result.damping_ratio = ComputeDampingRegression(result.pair_envelope, result.natural_freq_hz);
+    return result;
+}
+
 float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSamples>& history, std::size_t start_phys_idx, std::size_t count) noexcept {
     if (count == 0U) {
         return 0.0f;
@@ -672,6 +1031,10 @@ float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSampl
 
     if (count < kFftWindowSamples) {
         const std::size_t fft_size = (count < 512U) ? 512U : 1024U;
+        const FftBinRange range = SelectFftBinRange(fft_size, sample_rate_hz);
+        if (!range.valid) {
+            return 0.0f;
+        }
 
         std::fill(fft_input_.begin(), fft_input_.begin() + (fft_size * 2U), 0.0f);
 
@@ -711,7 +1074,7 @@ float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSampl
         float max_val = 0.0f;
         std::size_t max_bin = 0U;
 
-        for (std::size_t bin = 1U; bin < (fft_size / 2U); ++bin) {
+        for (std::size_t bin = range.min_bin; bin <= range.max_bin; ++bin) {
             const float real = fft_input_[2U * bin];
             const float imag = fft_input_[2U * bin + 1U];
             const float power = (real * real) + (imag * imag);
@@ -729,7 +1092,13 @@ float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSampl
             }
         }
 
-        return (static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(fft_size);
+        return (max_bin == 0U) ? 0.0f :
+            ((static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(fft_size));
+    }
+
+    const FftBinRange range = SelectFftBinRange(kFftWindowSamples, sample_rate_hz);
+    if (!range.valid) {
+        return 0.0f;
     }
 
     const std::size_t step = kFftWindowSamples - kFftOverlapSamples;
@@ -776,7 +1145,7 @@ float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSampl
             return 0.0f;
         }
 
-        for (std::size_t bin = 1U; bin < (kFftWindowSamples / 2U); ++bin) {
+        for (std::size_t bin = range.min_bin; bin <= range.max_bin; ++bin) {
             const float real = fft_input_[2U * bin];
             const float imag = fft_input_[2U * bin + 1U];
             const float power = (real * real) + (imag * imag);
@@ -789,7 +1158,7 @@ float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSampl
     float max_val = 0.0f;
     std::size_t max_bin = 0U;
 
-    for (std::size_t bin = 1U; bin < (kFftWindowSamples / 2U); ++bin) {
+    for (std::size_t bin = range.min_bin; bin <= range.max_bin; ++bin) {
         local_psd[bin] *= norm;
         if (local_psd[bin] > max_val) {
             max_val = local_psd[bin];
@@ -797,7 +1166,8 @@ float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSampl
         }
     }
 
-    return (static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(kFftWindowSamples);
+    return (max_bin == 0U) ? 0.0f :
+        ((static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(kFftWindowSamples));
 }
 
 bool Monitor::ComputeSwayAndDamping(MonitorResult& result) noexcept {
@@ -964,10 +1334,10 @@ void Monitor::GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, 
 }
 
 #if CONFIG_MONITOR_DEBUG_DUMP
-void Monitor::DumpDebugToSD(const DecayRegion& roll_decay, const DecayRegion& pitch_decay,
-                            const PeakList& roll_peaks, const PeakList& pitch_peaks,
+void Monitor::DumpDebugToSD(const ModalAxisResult& roll_modal, const ModalAxisResult& pitch_modal,
                             float freq_roll_hz, float freq_pitch_hz,
-                            float zeta_roll, float zeta_pitch) noexcept {
+                            float zeta_roll, float zeta_pitch,
+                            std::int64_t modal_elapsed_us) noexcept {
     FILE* f = fopen(CONFIG_APP_SD_MOUNT_POINT "/dbg_dump.csv", "a");
     if (f == nullptr) {
         static bool warned = false;
@@ -987,13 +1357,14 @@ void Monitor::DumpDebugToSD(const DecayRegion& roll_decay, const DecayRegion& pi
                  static_cast<unsigned long long>(now_us),
                  static_cast<unsigned>(buf_size),
                  static_cast<double>(rate_hz));
+    std::fprintf(f, "MODAL_TIME_US,%lld\n", static_cast<long long>(modal_elapsed_us));
 
     std::fprintf(f, "DECAY,R,%u,%u\n",
-                 static_cast<unsigned>(roll_decay.start_index),
-                 static_cast<unsigned>(roll_decay.count));
+                 static_cast<unsigned>(roll_modal.decay.start_index),
+                 static_cast<unsigned>(roll_modal.decay.count));
     std::fprintf(f, "DECAY,P,%u,%u\n",
-                 static_cast<unsigned>(pitch_decay.start_index),
-                 static_cast<unsigned>(pitch_decay.count));
+                 static_cast<unsigned>(pitch_modal.decay.start_index),
+                 static_cast<unsigned>(pitch_modal.decay.count));
 
     std::fprintf(f, "RESULT,R,%.6f,%.6f\n",
                  static_cast<double>(freq_roll_hz),
@@ -1011,8 +1382,26 @@ void Monitor::DumpDebugToSD(const DecayRegion& roll_decay, const DecayRegion& pi
         }
         std::fprintf(f, "\n");
     };
-    write_peaks('R', roll_peaks);
-    write_peaks('P', pitch_peaks);
+    write_peaks('R', roll_modal.pair_envelope);
+    write_peaks('P', pitch_modal.pair_envelope);
+
+    auto write_modal = [&f](char axis, const ModalAxisResult& modal) {
+        std::fprintf(f, "COLLAPSED,%c,%u\n",
+                     axis,
+                     static_cast<unsigned>(modal.collapsed_extrema.count));
+        std::fprintf(f, "PAIRS,%c,%u", axis, static_cast<unsigned>(modal.centerline_pairs.count));
+        for (std::size_t i = 0U; i < modal.centerline_pairs.count; ++i) {
+            const CenterlinePair& pair = modal.centerline_pairs.pairs[i];
+            std::fprintf(f, ",%u,%.6f,%.6f,%.6f",
+                         static_cast<unsigned>(pair.center_logical_index),
+                         static_cast<double>(pair.center_value),
+                         static_cast<double>(pair.amplitude),
+                         static_cast<double>(pair.time_s));
+        }
+        std::fprintf(f, "\n");
+    };
+    write_modal('R', roll_modal);
+    write_modal('P', pitch_modal);
 
     auto write_raw = [this, &f](char axis, const std::array<float, kStorageSamples>& history) {
         std::fprintf(f, "RAW,%c", axis);

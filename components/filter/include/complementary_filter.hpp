@@ -23,9 +23,9 @@ public:
         const float gx_rad = math::deg2rad(gyro[0]);
         const float gy_rad = math::deg2rad(gyro[1]);
 
-        // Compute pitch and roll from accelerometer
-        const float accel_pitch = std::atan2(accel[1], std::sqrt(accel[0] * accel[0] + accel[2] * accel[2]));
-        const float accel_roll  = std::atan2(-accel[0], accel[2]);
+        // Compute pitch and roll from accelerometer (branch frame: z-up, x-down, y-toward-joint)
+        const float accel_pitch = std::atan2(accel[0], accel[2]);
+        const float accel_roll  = std::atan2(-accel[1], accel[2]);
 
         // Integrate gyroscope
         const float gyro_pitch = pitch_ + (gy_rad * dt);

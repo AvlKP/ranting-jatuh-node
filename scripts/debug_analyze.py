@@ -154,14 +154,10 @@ def recompute_frequency(raw_data: List[float], decay_start: int,
               file=sys.stderr)
         return 0.0
 
-    if decay_count == 0 or not raw_data:
+    if not raw_data:
         return 0.0
 
-    decay_end = decay_start + decay_count
-    if decay_end > len(raw_data):
-        decay_end = len(raw_data)
-
-    region = raw_data[decay_start:decay_end]
+    region = raw_data
     n = len(region)
     if n < 2:
         return 0.0
@@ -177,13 +173,15 @@ def recompute_frequency(raw_data: List[float], decay_start: int,
     noverlap = nperseg // 2
 
     freqs, psd = welch(region, fs=rate_hz, nperseg=nperseg,
-                       noverlap=noverlap, window="hann",
+                       noverlap=noverlap, window="boxcar",
                        detrend=False, scaling="spectrum")
 
-    if len(freqs) < 2:
+    # Start search from >0.5 Hz to ignore DC/transient smear
+    valid_idx = np.where(freqs >= 0.5)[0]
+    if len(valid_idx) == 0:
         return 0.0
 
-    peak_idx = int(np.argmax(psd[1:])) + 1
+    peak_idx = valid_idx[np.argmax(psd[valid_idx])]
     return float(freqs[peak_idx])
 
 
@@ -292,7 +290,7 @@ def generate_plot(snapshot: DebugSnapshot, output_file: Optional[str] = None):
     ]:
         if decay_count < 2:
             continue
-        region = raw[decay_start:decay_start + decay_count]
+        region = raw
         n = len(region)
         if n < 2:
             continue
@@ -303,11 +301,16 @@ def generate_plot(snapshot: DebugSnapshot, output_file: Optional[str] = None):
         nperseg = min(fft_sz, n)
         noverlap = nperseg // 2
         freqs, psd = welch(region, fs=rate, nperseg=nperseg,
-                           noverlap=noverlap, window="hann",
+                           noverlap=noverlap, window="boxcar",
                            detrend=False, scaling="spectrum")
         if len(freqs) < 2:
             continue
-        peak_idx = int(np.argmax(psd[1:])) + 1
+            
+        valid_idx = np.where(freqs >= 0.5)[0]
+        if len(valid_idx) > 0:
+            peak_idx = valid_idx[np.argmax(psd[valid_idx])]
+        else:
+            peak_idx = int(np.argmax(psd[1:])) + 1
         ax1.semilogy(freqs, psd, color=color, alpha=0.7, linewidth=0.8, label=label)
         ax1.axvline(freqs[peak_idx], color=color, linestyle="--", alpha=0.6,
                     label=f"{label} peak={freqs[peak_idx]:.3f} Hz")
