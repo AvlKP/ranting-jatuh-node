@@ -11,6 +11,8 @@
 #include <cstring>
 #include <ctime>
 #include <cctype>
+#include <array>
+#include <cstdarg>
 
 namespace dashboard {
 
@@ -18,6 +20,66 @@ namespace {
 
 static const char* kTag = "DASHBOARD";
 Dashboard* g_self = nullptr;
+static constexpr std::size_t kMaxStreamQuery = 20U;
+static constexpr std::size_t kMaxHistoryQuery = 150U;
+static constexpr std::size_t kFftFullSize = 512U;
+static constexpr std::size_t kChunkBufferSize = 768U;
+static constexpr std::size_t kPathBufferSize = 512U;
+static constexpr std::size_t kDownloadChunkSize = 1024U;
+
+static_assert(kFftFullSize == monitor::kFftWindowSamples / 2U,
+              "Dashboard FFT buffer must match monitor PSD length.");
+static_assert((logger::mqtt::kMaxMqttLogLines * logger::mqtt::kMaxMqttLogLineLen) <= 2048U,
+              "MQTT log snapshot exceeds dashboard static buffer budget.");
+
+std::array<char, kChunkBufferSize> g_chunk_buf{};
+std::array<monitor::StreamSample, kMaxStreamQuery> g_stream_buf{};
+std::array<float, kMaxHistoryQuery> g_roll_buf{};
+std::array<float, kMaxHistoryQuery> g_pitch_buf{};
+std::array<float, kFftFullSize> g_fft_buf{};
+std::array<char, logger::mqtt::kMaxMqttLogLines * logger::mqtt::kMaxMqttLogLineLen> g_logs_flat{};
+std::array<char, kPathBufferSize> g_file_path{};
+std::array<char, kDownloadChunkSize> g_download_chunk{};
+
+esp_err_t SendLiteral(httpd_req_t* req, const char* text) noexcept {
+    return httpd_resp_send_chunk(req, text, HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t SendFormatted(httpd_req_t* req, const char* format, ...) noexcept {
+    va_list args;
+    va_start(args, format);
+    const int len = std::vsnprintf(g_chunk_buf.data(), g_chunk_buf.size(), format, args);
+    va_end(args);
+
+    if (len < 0 || static_cast<std::size_t>(len) >= g_chunk_buf.size()) {
+        ESP_LOGW(kTag, "Dashboard JSON chunk truncated");
+        return ESP_FAIL;
+    }
+    return httpd_resp_send_chunk(req, g_chunk_buf.data(), len);
+}
+
+bool JsonEscape(const char* src, char* dst, std::size_t dst_len) noexcept {
+    if (src == nullptr || dst == nullptr || dst_len == 0U) {
+        return false;
+    }
+
+    std::size_t out = 0U;
+    for (std::size_t i = 0U; src[i] != '\0'; ++i) {
+        const unsigned char c = static_cast<unsigned char>(src[i]);
+        const bool needs_escape = (c == '"' || c == '\\');
+        const std::size_t needed = needs_escape ? 2U : 1U;
+        if ((out + needed) >= dst_len) {
+            dst[0] = '\0';
+            return false;
+        }
+        if (needs_escape) {
+            dst[out++] = '\\';
+        }
+        dst[out++] = static_cast<char>(c);
+    }
+    dst[out] = '\0';
+    return true;
+}
 
 // Beautiful premium dark mode dashboard raw HTML/CSS/JS string literal
 const char* kIndexHtml = R"raw(<!DOCTYPE html>
@@ -707,7 +769,9 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
     httpd_resp_set_hdr(req, "Cache-Control", "no-store, no-cache, must-revalidate");
 
     // Start JSON streaming using chunked response to conserve RAM
-    httpd_resp_send_chunk(req, "{", 1);
+    if (SendLiteral(req, "{") != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     // WiFi & Heap Stats
     bool wifi_connected = false;
@@ -732,29 +796,36 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
         damp_pitch = g_self->latest_result_.pitch_damping_ratio;
     }
 
-    char chunk_buf[384];
-    int len = std::snprintf(chunk_buf, sizeof(chunk_buf),
-                            "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,\"node_id\":\"%s\",\"node_state\":\"%s\","
-                            "\"natural_freq_roll_hz\":%.3f,\"natural_freq_pitch_hz\":%.3f,"
-                            "\"roll_damping_ratio\":%.4f,\"pitch_damping_ratio\":%.4f,",
-                            wifi_connected ? "true" : "false",
-                            g_self->logger_.HasMonitorResult() ? "true" : "false", // Use logger state as MQTT proxy
-                            static_cast<unsigned long>(esp_get_free_heap_size()),
-                            CONFIG_MONITOR_IMU_RATE_HZ,
-                            logger::mqtt::GetNodeId(),
-                            state_str,
-                            freq_roll,
-                            freq_pitch,
-                            damp_roll,
-                            damp_pitch);
-    httpd_resp_send_chunk(req, chunk_buf, len);
+    if (SendFormatted(req,
+                      "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,\"node_id\":\"%s\",\"node_state\":\"%s\","
+                      "\"natural_freq_roll_hz\":%.3f,\"natural_freq_pitch_hz\":%.3f,"
+                      "\"roll_damping_ratio\":%.4f,\"pitch_damping_ratio\":%.4f,"
+                      "\"monitor_result_drops\":%lu,\"monitor_failure_drops\":%lu,"
+                      "\"logger_event_drops\":%lu,\"logger_parameter_drops\":%lu,\"logger_failure_drops\":%lu,",
+                      wifi_connected ? "true" : "false",
+                      g_self->logger_.HasMonitorResult() ? "true" : "false",
+                      static_cast<unsigned long>(esp_get_free_heap_size()),
+                      CONFIG_MONITOR_IMU_RATE_HZ,
+                      logger::mqtt::GetNodeId(),
+                      state_str,
+                      freq_roll,
+                      freq_pitch,
+                      damp_roll,
+                      damp_pitch,
+                      static_cast<unsigned long>(g_self->monitor_.DroppedResultEvents()),
+                      static_cast<unsigned long>(g_self->monitor_.DroppedFailureEvents()),
+                      static_cast<unsigned long>(g_self->logger_.DroppedEvents()),
+                      static_cast<unsigned long>(g_self->logger_.DroppedParameters()),
+                      static_cast<unsigned long>(g_self->logger_.DroppedFailures())) != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     // Latest Sensor Stream Table (20 samples)
-    httpd_resp_send_chunk(req, "\"stream_samples\":[", 18);
-    static constexpr std::size_t kMaxStreamQuery = 20U;
-    std::array<monitor::StreamSample, kMaxStreamQuery> stream_buf{};
+    if (SendLiteral(req, "\"stream_samples\":[") != ESP_OK) {
+        return ESP_FAIL;
+    }
     std::size_t stream_count = 0U;
-    g_self->monitor_.GetLatestSamples(stream_buf.data(), stream_count, kMaxStreamQuery);
+    g_self->monitor_.GetLatestSamples(g_stream_buf.data(), stream_count, kMaxStreamQuery);
 
     const std::uint64_t current_uptime_us = static_cast<std::uint64_t>(esp_timer_get_time());
     std::time_t current_time = 0;
@@ -764,81 +835,103 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
         std::uint64_t sample_ts_us = 0;
         if (current_time >= 1672531200) {
             const std::uint64_t current_time_us = static_cast<std::uint64_t>(current_time) * 1000000ULL;
-            if (current_uptime_us >= stream_buf[i].timestamp_us) {
-                const std::uint64_t age_us = current_uptime_us - stream_buf[i].timestamp_us;
+            if (current_uptime_us >= g_stream_buf[i].timestamp_us) {
+                const std::uint64_t age_us = current_uptime_us - g_stream_buf[i].timestamp_us;
                 sample_ts_us = current_time_us - age_us;
             } else {
                 sample_ts_us = current_time_us;
             }
         } else {
-            sample_ts_us = stream_buf[i].timestamp_us;
+            sample_ts_us = g_stream_buf[i].timestamp_us;
         }
 
-        len = std::snprintf(chunk_buf, sizeof(chunk_buf),
-                            "%s{\"ts\":%llu,\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,\"gx\":%.1f,\"gy\":%.1f,\"gz\":%.1f,\"r\":%.2f,\"p\":%.2f}",
-                            (i > 0U) ? "," : "",
-                            static_cast<unsigned long long>(sample_ts_us),
-                            stream_buf[i].accel_x, stream_buf[i].accel_y, stream_buf[i].accel_z,
-                            stream_buf[i].gyro_x, stream_buf[i].gyro_y, stream_buf[i].gyro_z,
-                            stream_buf[i].roll, stream_buf[i].pitch);
-        httpd_resp_send_chunk(req, chunk_buf, len);
+        if (SendFormatted(req,
+                          "%s{\"ts\":%llu,\"ax\":%.3f,\"ay\":%.3f,\"az\":%.3f,\"gx\":%.1f,\"gy\":%.1f,\"gz\":%.1f,\"r\":%.2f,\"p\":%.2f}",
+                          (i > 0U) ? "," : "",
+                          static_cast<unsigned long long>(sample_ts_us),
+                          g_stream_buf[i].accel_x, g_stream_buf[i].accel_y, g_stream_buf[i].accel_z,
+                          g_stream_buf[i].gyro_x, g_stream_buf[i].gyro_y, g_stream_buf[i].gyro_z,
+                          g_stream_buf[i].roll, g_stream_buf[i].pitch) != ESP_OK) {
+            return ESP_FAIL;
+        }
     }
-    httpd_resp_send_chunk(req, "],", 2);
+    if (SendLiteral(req, "],") != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     // MicroSD Directory browser
-    httpd_resp_send_chunk(req, "\"files\":[", 9);
+    if (SendLiteral(req, "\"files\":[") != ESP_OK) {
+        return ESP_FAIL;
+    }
     bool first_file = true;
     DIR* dir = opendir(CONFIG_APP_SD_MOUNT_POINT);
     if (dir != nullptr) {
         struct dirent* entry;
         while ((entry = readdir(dir)) != nullptr) {
             if (entry->d_type == DT_REG) {
-                char file_path[512];
-                std::snprintf(file_path, sizeof(file_path), "%s/%s", CONFIG_APP_SD_MOUNT_POINT, entry->d_name);
+                const int path_len = std::snprintf(g_file_path.data(), g_file_path.size(), "%s/%s", CONFIG_APP_SD_MOUNT_POINT, entry->d_name);
+                if (path_len <= 0 || static_cast<std::size_t>(path_len) >= g_file_path.size()) {
+                    ESP_LOGW(kTag, "Skipping long SD filename: %s", entry->d_name);
+                    continue;
+                }
                 struct stat st{};
                 long long fsize = 0;
-                if (stat(file_path, &st) == 0) {
+                if (stat(g_file_path.data(), &st) == 0) {
                     fsize = st.st_size;
                 }
-                
-                len = std::snprintf(chunk_buf, sizeof(chunk_buf),
-                                    "%s{\"name\":\"%s\",\"size\":%lld}",
-                                    first_file ? "" : ",",
-                                    entry->d_name,
-                                    fsize);
-                httpd_resp_send_chunk(req, chunk_buf, len);
+
+                char escaped_name[128];
+                if (!JsonEscape(entry->d_name, escaped_name, sizeof(escaped_name))) {
+                    ESP_LOGW(kTag, "Skipping unescaped SD filename: %s", entry->d_name);
+                    continue;
+                }
+                if (SendFormatted(req,
+                                  "%s{\"name\":\"%s\",\"size\":%lld}",
+                                  first_file ? "" : ",",
+                                  escaped_name,
+                                  fsize) != ESP_OK) {
+                    closedir(dir);
+                    return ESP_FAIL;
+                }
                 first_file = false;
             }
         }
         closedir(dir);
     }
-    httpd_resp_send_chunk(req, "],", 2);
+    if (SendLiteral(req, "],") != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     // Downsampled Tilt History (Max 150 points for line charts)
-    httpd_resp_send_chunk(req, "\"tilt_history\":{\"roll\":[", 24);
-    static constexpr std::size_t kMaxHistoryQuery = 150U;
-    std::array<float, kMaxHistoryQuery> roll_buf{};
-    std::array<float, kMaxHistoryQuery> pitch_buf{};
+    if (SendLiteral(req, "\"tilt_history\":{\"roll\":[") != ESP_OK) {
+        return ESP_FAIL;
+    }
     std::size_t history_count = 0U;
-    g_self->monitor_.GetTiltHistory(roll_buf.data(), pitch_buf.data(), history_count, kMaxHistoryQuery);
+    g_self->monitor_.GetTiltHistory(g_roll_buf.data(), g_pitch_buf.data(), history_count, kMaxHistoryQuery);
 
     for (std::size_t i = 0U; i < history_count; ++i) {
-        len = std::snprintf(chunk_buf, sizeof(chunk_buf), "%s%.2f", (i > 0U) ? "," : "", roll_buf[i]);
-        httpd_resp_send_chunk(req, chunk_buf, len);
+        if (SendFormatted(req, "%s%.2f", (i > 0U) ? "," : "", g_roll_buf[i]) != ESP_OK) {
+            return ESP_FAIL;
+        }
     }
-    httpd_resp_send_chunk(req, "],\"pitch\":[", 11);
+    if (SendLiteral(req, "],\"pitch\":[") != ESP_OK) {
+        return ESP_FAIL;
+    }
     for (std::size_t i = 0U; i < history_count; ++i) {
-        len = std::snprintf(chunk_buf, sizeof(chunk_buf), "%s%.2f", (i > 0U) ? "," : "", pitch_buf[i]);
-        httpd_resp_send_chunk(req, chunk_buf, len);
+        if (SendFormatted(req, "%s%.2f", (i > 0U) ? "," : "", g_pitch_buf[i]) != ESP_OK) {
+            return ESP_FAIL;
+        }
     }
-    httpd_resp_send_chunk(req, "]},", 3);
+    if (SendLiteral(req, "]},") != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     // FFT PSD (downsampled from 512 to 128 for lightweight HTTP response)
-    httpd_resp_send_chunk(req, "\"fft\":[", 7);
-    static constexpr std::size_t kFftFullSize = 512U;
-    std::array<float, kFftFullSize> fft_buf{};
+    if (SendLiteral(req, "\"fft\":[") != ESP_OK) {
+        return ESP_FAIL;
+    }
     std::size_t fft_count = 0U;
-    g_self->monitor_.GetFftData(fft_buf.data(), fft_count);
+    g_self->monitor_.GetFftData(g_fft_buf.data(), fft_count);
 
     if (fft_count > 0U) {
         // Downsample factor 4 (512 / 128)
@@ -847,44 +940,48 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
             for (std::size_t j = 0U; j < 4U; ++j) {
                 const std::size_t idx = i * 4U + j;
                 if (idx < fft_count) {
-                    val += fft_buf[idx];
+                    val += g_fft_buf[idx];
                 }
             }
             val /= 4.0f; // average
             
-            len = std::snprintf(chunk_buf, sizeof(chunk_buf), "%s%.4f", (i > 0U) ? "," : "", val);
-            httpd_resp_send_chunk(req, chunk_buf, len);
+            if (SendFormatted(req, "%s%.4f", (i > 0U) ? "," : "", val) != ESP_OK) {
+                return ESP_FAIL;
+            }
         }
     }
-    httpd_resp_send_chunk(req, "],", 2);
+    if (SendLiteral(req, "],") != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     // MQTT Circular Buffer Logs
-    httpd_resp_send_chunk(req, "\"mqtt_logs\":[", 13);
-    char logs_flat[logger::mqtt::kMaxMqttLogLines * logger::mqtt::kMaxMqttLogLineLen];
+    if (SendLiteral(req, "\"mqtt_logs\":[") != ESP_OK) {
+        return ESP_FAIL;
+    }
     std::size_t logs_count = 0;
-    logger::mqtt::g_mqtt_log_buffer.GetLogs(logs_flat, logger::mqtt::kMaxMqttLogLines, logs_count);
+    logger::mqtt::g_mqtt_log_buffer.GetLogs(g_logs_flat.data(), logger::mqtt::kMaxMqttLogLines, logs_count);
 
     for (std::size_t i = 0U; i < logs_count; ++i) {
-        const char* single_line = logs_flat + (i * logger::mqtt::kMaxMqttLogLineLen);
+        const char* single_line = g_logs_flat.data() + (i * logger::mqtt::kMaxMqttLogLineLen);
         
-        // Escape quotes to maintain strict JSON compliance
         char escaped[128];
-        std::size_t esc_idx = 0;
-        for (std::size_t k = 0; single_line[k] != '\0' && esc_idx < sizeof(escaped) - 4; ++k) {
-            if (single_line[k] == '"' || single_line[k] == '\\') {
-                escaped[esc_idx++] = '\\';
-            }
-            escaped[esc_idx++] = single_line[k];
+        if (!JsonEscape(single_line, escaped, sizeof(escaped))) {
+            ESP_LOGW(kTag, "Skipping long MQTT log line");
+            continue;
         }
-        escaped[esc_idx] = '\0';
 
-        len = std::snprintf(chunk_buf, sizeof(chunk_buf), "%s\"%s\"", (i > 0U) ? "," : "", escaped);
-        httpd_resp_send_chunk(req, chunk_buf, len);
+        if (SendFormatted(req, "%s\"%s\"", (i > 0U) ? "," : "", escaped) != ESP_OK) {
+            return ESP_FAIL;
+        }
     }
-    httpd_resp_send_chunk(req, "]", 1);
+    if (SendLiteral(req, "]") != ESP_OK) {
+        return ESP_FAIL;
+    }
 
     // Terminate JSON stream
-    httpd_resp_send_chunk(req, "}", 1);
+    if (SendLiteral(req, "}") != ESP_OK) {
+        return ESP_FAIL;
+    }
     httpd_resp_send_chunk(req, nullptr, 0); // End chunk transmission
     return ESP_OK;
 }
@@ -935,10 +1032,13 @@ esp_err_t Dashboard::DownloadHandler(httpd_req_t* req) noexcept {
         return ESP_FAIL;
     }
 
-    char file_path[512];
-    std::snprintf(file_path, sizeof(file_path), "%s/%s", CONFIG_APP_SD_MOUNT_POINT, filename);
+    const int path_len = std::snprintf(g_file_path.data(), g_file_path.size(), "%s/%s", CONFIG_APP_SD_MOUNT_POINT, filename);
+    if (path_len <= 0 || static_cast<std::size_t>(path_len) >= g_file_path.size()) {
+        httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "File path too long");
+        return ESP_FAIL;
+    }
 
-    FILE* f = std::fopen(file_path, "rb");
+    FILE* f = std::fopen(g_file_path.data(), "rb");
     if (f == nullptr) {
         httpd_resp_send_err(req, HTTPD_404_NOT_FOUND, "File not found");
         return ESP_FAIL;
@@ -952,11 +1052,10 @@ esp_err_t Dashboard::DownloadHandler(httpd_req_t* req) noexcept {
     httpd_resp_set_hdr(req, "Content-Disposition", disposition);
 
     // Send file contents in chunks
-    char chunk_buf[1024];
     size_t read_bytes;
     esp_err_t err = ESP_OK;
-    while ((read_bytes = std::fread(chunk_buf, 1, sizeof(chunk_buf), f)) > 0) {
-        err = httpd_resp_send_chunk(req, chunk_buf, read_bytes);
+    while ((read_bytes = std::fread(g_download_chunk.data(), 1, g_download_chunk.size(), f)) > 0) {
+        err = httpd_resp_send_chunk(req, g_download_chunk.data(), read_bytes);
         if (err != ESP_OK) {
             ESP_LOGE(kTag, "Failed to send chunk: %s", esp_err_to_name(err));
             break;

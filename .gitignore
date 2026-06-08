@@ -9,3 +9,6 @@ managed_components/
 sdkconfig*
 .agent/
 logs/
+build-test/
+__pycache__
+build-*/

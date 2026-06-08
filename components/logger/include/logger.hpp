@@ -24,6 +24,10 @@ public:
     [[nodiscard]] bool Start() noexcept;
     [[nodiscard]] bool VerifyMqttPublish(const char* topic, const char* payload) noexcept;
     [[nodiscard]] bool HasMonitorResult() const noexcept;
+    [[nodiscard]] TaskHandle_t GetTaskHandle() const noexcept { return task_handle_; }
+    [[nodiscard]] std::uint32_t DroppedEvents() const noexcept { return dropped_events_; }
+    [[nodiscard]] std::uint32_t DroppedParameters() const noexcept { return dropped_parameters_; }
+    [[nodiscard]] std::uint32_t DroppedFailures() const noexcept { return dropped_failures_; }
 
     static void EventHandler(void* handler_args,
                               esp_event_base_t base,
@@ -44,6 +48,7 @@ private:
     };
 
     static constexpr std::size_t kQueueDepth = 16U;
+    static_assert(kQueueDepth <= 32U, "Logger queue depth exceeds bounded RAM budget.");
     QueueHandle_t queue_handle_{nullptr};
     TaskHandle_t task_handle_{nullptr};
 

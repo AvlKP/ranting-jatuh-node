@@ -10,11 +10,12 @@ This document defines the MQTT interface used for communication between the IoT 
 ## Topics and Payloads
 
 ### 1. Monitoring Parameters
-Node publishes processed monitoring data event-driven upon state transitions or refreshes.
+Node publishes processed monitoring data upon state transitions or buffer refreshes. Deployment mode batches parameter records to save power; debug mode may publish per event for faster feedback.
 
-- **Topic**: `ranting/parameters`
+- **Topic**: `ranting/{node_id}/parameters`
 - **Content Type**: `application/json`
-- **Publish Frequency**: Immediate upon transition to `FREE_DECAY`, exit from `FREE_DECAY` (to `IDLE`), or intermediate buffer refresh.
+- **Publish Frequency**: Batched for deployment, per event for debugging. Events include `IDLE` window update, `DISTURBED` buffer refresh, and final `DISTURBED`->`IDLE` result.
+- **Payload**: one JSON object per record. Batched publishes may contain multiple newline-delimited JSON objects.
 - **JSON Payload Schema**:
 
 ```json
@@ -34,7 +35,7 @@ Node publishes processed monitoring data event-driven upon state transitions or 
   "natural_freq_hz": 4.15,
   "natural_freq_roll_hz": 4.15,
   "natural_freq_pitch_hz": 3.85,
-  "state": "FREE_DECAY",
+  "state": "DISTURBED",
   "sample_count": 512
 }
 ```
@@ -51,18 +52,18 @@ Node publishes processed monitoring data event-driven upon state transitions or 
 | `roll_sway_pp_mean` | `float` | Mean peak-to-peak roll sway in degrees. |
 | `pitch_sway_pp_max` | `float` | Max peak-to-peak pitch sway in degrees. |
 | `pitch_sway_pp_mean` | `float` | Mean peak-to-peak pitch sway in degrees. |
-| `roll_damping_ratio` | `float` | Estimated damping ratio for roll (0.0 in DISTURBED). |
-| `pitch_damping_ratio` | `float` | Estimated damping ratio for pitch (0.0 in DISTURBED). |
+| `roll_damping_ratio` | `float` | Estimated damping ratio for roll. 0.0 for IDLE or intermediate DISTURBED refresh. |
+| `pitch_damping_ratio` | `float` | Estimated damping ratio for pitch. 0.0 for IDLE or intermediate DISTURBED refresh. |
 | `natural_freq_hz` | `float` | Estimated natural frequency in Hz (max of roll/pitch). |
-| `natural_freq_roll_hz` | `float` | Estimated natural frequency for roll in Hz (0.0 in DISTURBED/IDLE). |
-| `natural_freq_pitch_hz` | `float` | Estimated natural frequency for pitch in Hz (0.0 in DISTURBED/IDLE). |
-| `state` | `string` | FSM state that produced this payload: `"IDLE"`, `"DISTURBED"`, or `"FREE_DECAY"`. |
+| `natural_freq_roll_hz` | `float` | Estimated natural frequency for roll in Hz. 0.0 for IDLE or intermediate DISTURBED refresh. |
+| `natural_freq_pitch_hz` | `float` | Estimated natural frequency for pitch in Hz. 0.0 for IDLE or intermediate DISTURBED refresh. |
+| `state` | `string` | FSM state that produced this payload: `"IDLE"` or `"DISTURBED"`. |
 | `sample_count` | `uint32` | Number of samples in the calculation window. |
 
 ### 2. Failure Events
 Node publishes immediate notifications when a failure event is detected.
 
-- **Topic**: `ranting/failures`
+- **Topic**: `ranting/{node_id}/failures`
 - **Content Type**: `text/csv`
 - **Publish Frequency**: Immediate upon detection.
 - **CSV Format**:
@@ -77,4 +78,5 @@ Node publishes immediate notifications when a failure event is detected.
 ## Implementation Notes
 - **QoS**: Default 0 (at most once).
 - **Time Sync**: Nodes attempt NTP sync before publishing. If sync fails, `unix_time` will be 0.
-- **Batching**: Parameters are batched and sent in a single connection session to save power. Failures trigger an immediate connection.
+- **Node ID**: `{node_id}` comes from `CONFIG_LOGGER_NODE_ID`, stored NVS value, or generated adjective-noun ID on first boot.
+- **Batching**: Deployment parameter publishes are batched and sent in one connection session to save power. Debug builds may publish per event. Failures trigger immediate publish.

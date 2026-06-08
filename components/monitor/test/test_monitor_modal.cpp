@@ -4,7 +4,10 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <new>
 
+#include "dsps_fft2r.h"
+#include "esp_err.h"
 #include "unity.h"
 
 #define private public
@@ -23,8 +26,20 @@ sensor::Lsm6ds3::Config DummyImuConfig() {
     return cfg;
 }
 
-Monitor MakeMonitor(const MonitorConfig& config) {
-    return Monitor{DummyImuConfig(), config};
+Monitor& MakeMonitor(const MonitorConfig& config) {
+    alignas(Monitor) static std::byte storage[sizeof(Monitor)];
+    static Monitor* monitor = nullptr;
+    static bool fft_initialized = false;
+    if (!fft_initialized) {
+        TEST_ASSERT_EQUAL(ESP_OK, dsps_fft2r_init_fc32(nullptr, static_cast<int>(monitor::kFftWindowSamples)));
+        fft_initialized = true;
+    }
+    if (monitor != nullptr) {
+        monitor->~Monitor();
+    }
+    monitor = new (storage) Monitor{DummyImuConfig(), config};
+    monitor->fft_initialized_ = true;
+    return *monitor;
 }
 
 void LoadSamples(Monitor& monitor, const float* samples, std::size_t count) {
@@ -40,7 +55,7 @@ void LoadSamples(Monitor& monitor, const float* samples, std::size_t count) {
 TEST_CASE("raw extrema detection applies spacing filter", "[monitor][modal]") {
     MonitorConfig config{};
     config.peak_min_spacing = 3U;
-    Monitor monitor = MakeMonitor(config);
+    Monitor& monitor = MakeMonitor(config);
     const float samples[] = {0.0f, 1.0f, 0.0f, 0.8f, 0.0f, -1.0f, 0.0f};
     LoadSamples(monitor, samples, 7U);
 
@@ -54,7 +69,7 @@ TEST_CASE("raw extrema detection applies spacing filter", "[monitor][modal]") {
 TEST_CASE("lobe collapse keeps strongest same-kind extrema", "[monitor][modal]") {
     MonitorConfig config{};
     config.centerline_lobe_reversal_deg = 0.5f;
-    Monitor monitor = MakeMonitor(config);
+    Monitor& monitor = MakeMonitor(config);
 
     Monitor::ExtremaList raw{};
     raw.count = 5U;
@@ -75,7 +90,7 @@ TEST_CASE("lobe collapse keeps strongest same-kind extrema", "[monitor][modal]")
 TEST_CASE("centerline pairs and residual endpoint hold", "[monitor][modal]") {
     MonitorConfig config{};
     config.centerline_min_amplitude_deg = 0.05f;
-    Monitor monitor = MakeMonitor(config);
+    Monitor& monitor = MakeMonitor(config);
     const float samples[] = {2.0f, 3.0f, 2.0f, 1.0f, 2.0f, 3.0f, 2.0f};
     LoadSamples(monitor, samples, 7U);
 
@@ -100,13 +115,13 @@ TEST_CASE("bounded FFT bin selection handles empty and clamped bands", "[monitor
     MonitorConfig config{};
     config.modal_freq_min_hz = 40.0f;
     config.modal_freq_max_hz = 50.0f;
-    Monitor monitor = MakeMonitor(config);
+    Monitor& monitor = MakeMonitor(config);
     Monitor::FftBinRange empty = monitor.SelectFftBinRange(512U, 26.0f);
     TEST_ASSERT_FALSE(empty.valid);
 
     config.modal_freq_min_hz = 0.5f;
     config.modal_freq_max_hz = 25.0f;
-    Monitor monitor_clamped = MakeMonitor(config);
+    Monitor& monitor_clamped = MakeMonitor(config);
     Monitor::FftBinRange range = monitor_clamped.SelectFftBinRange(512U, 26.0f);
     TEST_ASSERT_TRUE(range.valid);
     TEST_ASSERT_TRUE(range.min_bin >= 1U);
@@ -115,7 +130,7 @@ TEST_CASE("bounded FFT bin selection handles empty and clamped bands", "[monitor
 
 TEST_CASE("pair envelope damping needs sufficient decreasing amplitudes", "[monitor][modal]") {
     MonitorConfig config{};
-    Monitor monitor = MakeMonitor(config);
+    Monitor& monitor = MakeMonitor(config);
     Monitor::CenterlinePairList pairs{};
     pairs.count = 5U;
     pairs.pairs[0U] = {0U, 0.0f, 0.8f, 0.0f};
@@ -139,7 +154,7 @@ TEST_CASE("drifting baseline modal analysis finds nonzero frequency", "[monitor]
     config.centerline_lobe_reversal_deg = 0.10f;
     config.modal_freq_min_hz = 0.5f;
     config.modal_freq_max_hz = 25.0f;
-    Monitor monitor = MakeMonitor(config);
+    Monitor& monitor = MakeMonitor(config);
 
     constexpr std::size_t kCount = 156U;
     for (std::size_t i = 0U; i < kCount; ++i) {
@@ -151,7 +166,8 @@ TEST_CASE("drifting baseline modal analysis finds nonzero frequency", "[monitor]
     monitor.write_index_ = kCount;
     monitor.sample_count_ = kCount;
 
-    Monitor::ModalAxisResult result = monitor.AnalyzeModalAxis(monitor.roll_history_);
+    Monitor::ModalAxisResult result{};
+    monitor.AnalyzeModalAxis(monitor.roll_history_, result);
     TEST_ASSERT_TRUE(result.centerline_pairs.count >= 2U);
     TEST_ASSERT_TRUE(result.natural_freq_hz >= 0.5f);
     TEST_ASSERT_TRUE(result.natural_freq_hz <= 25.0f);

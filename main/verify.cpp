@@ -25,6 +25,39 @@ void LogStackHighWatermark(const char* stage) {
     ESP_LOGI(kVerifyTag, "%s stack high-water: %u bytes", stage, bytes);
 }
 
+void LogTaskStackHighWatermark(const char* task_name, TaskHandle_t task) {
+    if (task_name == nullptr || task == nullptr) {
+        return;
+    }
+
+    const UBaseType_t words = uxTaskGetStackHighWaterMark(task);
+    const std::uint32_t bytes = static_cast<std::uint32_t>(words) * sizeof(StackType_t);
+    ESP_LOGI(kVerifyTag, "%s stack high-water: %u bytes", task_name, bytes);
+}
+
+void LogRuntimeDiagnostics(const char* stage, TaskHandle_t monitor_task, TaskHandle_t logger_task) {
+    ESP_LOGI(kVerifyTag,
+             "%s stack guards: freertos_canary=%d compiler_mode_none=%d esp_event_task_stack=%d esp_timer_task_stack=%d",
+             stage,
+             CONFIG_FREERTOS_CHECK_STACKOVERFLOW_CANARY,
+             CONFIG_COMPILER_STACK_CHECK_MODE_NONE,
+             CONFIG_ESP_SYSTEM_EVENT_TASK_STACK_SIZE,
+             CONFIG_ESP_TIMER_TASK_STACK_SIZE);
+    LogStackHighWatermark(stage);
+    LogTaskStackHighWatermark("monitor_task", monitor_task);
+    LogTaskStackHighWatermark("logger_task", logger_task);
+
+#if defined(INCLUDE_xTaskGetHandle) && INCLUDE_xTaskGetHandle
+    LogTaskStackHighWatermark("esp_event", xTaskGetHandle("esp_event"));
+    LogTaskStackHighWatermark("esp_timer", xTaskGetHandle("esp_timer"));
+    LogTaskStackHighWatermark("tiT", xTaskGetHandle("tiT"));
+    LogTaskStackHighWatermark("mqtt_task", xTaskGetHandle("mqtt_task"));
+    LogTaskStackHighWatermark("httpd", xTaskGetHandle("httpd"));
+#else
+    ESP_LOGI(kVerifyTag, "%s service task handles unavailable: INCLUDE_xTaskGetHandle=0", stage);
+#endif
+}
+
 bool VerifySdStorage() {
     std::array<char, 96U> path{};
     const int len = std::snprintf(path.data(),

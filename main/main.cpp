@@ -22,6 +22,7 @@
 
 #include "pins.hpp"
 #include "monitor.hpp"
+#include "calibration.hpp"
 #include "logger.hpp"
 #include "logger_internal.hpp"
 #include "dashboard.hpp"
@@ -214,6 +215,17 @@ extern "C" void app_main(void) {
         return;
     }
 
+    {
+        calibration::CalibrationBias bias{};
+        bias.ax =  0.014925f;
+        bias.ay = -0.010015f;
+        bias.az =  0.010312f;
+        bias.gx =  1.096412f;
+        bias.gy = -2.593744f;
+        bias.gz =  0.414028f;
+        monitor.SetCalibrationBiases(bias);
+    }
+
     if (!InitSdCard()) {
         ESP_LOGE(kAppTag, "SD card init failed");
         return;
@@ -246,7 +258,7 @@ extern "C" void app_main(void) {
 
 #if CONFIG_APP_VERIFY_ENABLE
     ESP_LOGI(kVerifyTag, "Verification start");
-    verify::LogStackHighWatermark("startup");
+    verify::LogRuntimeDiagnostics("startup", nullptr, nullptr);
 
     sensor::lsm6ds3::Value gyro{};
     sensor::lsm6ds3::Value accel{};
@@ -275,7 +287,14 @@ extern "C" void app_main(void) {
 
 #if CONFIG_APP_VERIFY_ENABLE
     static_cast<void>(verify::VerifyMonitorOutput(logger));
-    verify::LogStackHighWatermark("post-verify");
+    verify::LogRuntimeDiagnostics("post-verify", monitor.GetTaskHandle(), logger.GetTaskHandle());
+    ESP_LOGI(kVerifyTag,
+             "backpressure monitor_result_drop=%lu monitor_failure_drop=%lu logger_drop=%lu logger_param_drop=%lu logger_failure_drop=%lu",
+             static_cast<unsigned long>(monitor.DroppedResultEvents()),
+             static_cast<unsigned long>(monitor.DroppedFailureEvents()),
+             static_cast<unsigned long>(logger.DroppedEvents()),
+             static_cast<unsigned long>(logger.DroppedParameters()),
+             static_cast<unsigned long>(logger.DroppedFailures()));
     ESP_LOGI(kVerifyTag, "Verification end");
 #endif
 

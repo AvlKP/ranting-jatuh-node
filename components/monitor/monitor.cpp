@@ -38,9 +38,6 @@ void MonitorTaskEntry(void* arg) noexcept {
 
 } // namespace
 
-static_assert(kStorageSamples >= kFftWindowSamples,
-              "Monitor storage window must be >= 1024 samples.");
-
 Monitor::Monitor(const sensor::Lsm6ds3::Config& imu_config,
                  const MonitorConfig& config) noexcept
     : imu_{imu_config},
@@ -81,7 +78,9 @@ bool Monitor::Init() noexcept {
         return false;
     }
 
-    ae_gpio_event_ = false;
+    portENTER_CRITICAL(&ae_mux_);
+    pending_ae_events_ = 0U;
+    portEXIT_CRITICAL(&ae_mux_);
 #else
     if (config_.ae_adc_channel < 0) {
         return false;
@@ -145,7 +144,7 @@ bool Monitor::Start() noexcept {
         kTaskStackSize,
         this,
         kTaskPriority,
-        static_cast<TaskHandle_t*>(nullptr),
+        &task_handle_,
         kTaskCore);
     if (ret != pdPASS) {
         ESP_LOGE(kTag, "Failed to create monitor_task");
@@ -228,16 +227,16 @@ bool Monitor::Update(float dt_s) noexcept {
 
     PushSample(current_roll, current_pitch, hpf_.magnitude());
 
-    ESP_LOGD(kTag, "Raw stream: ax=%.3f ay=%.3f az=%.3f gx=%.3f gy=%.3f gz=%.3f r=%.3f p=%.3f",
-             accel.x, accel.y, accel.z, gyro.x, gyro.y, gyro.z, current_roll, current_pitch);
+    ESP_LOGD(kTag, "Stream: ax=%.3f ay=%.3f az=%.3f gx=%.3f gy=%.3f gz=%.3f r=%.3f p=%.3f",
+             calib_ax, calib_ay, calib_az, calib_gx, calib_gy, calib_gz, current_roll, current_pitch);
 
     StreamSample sample{};
-    sample.accel_x = accel.x;
-    sample.accel_y = accel.y;
-    sample.accel_z = accel.z;
-    sample.gyro_x = gyro.x;
-    sample.gyro_y = gyro.y;
-    sample.gyro_z = gyro.z;
+    sample.accel_x = calib_ax;
+    sample.accel_y = calib_ay;
+    sample.accel_z = calib_az;
+    sample.gyro_x = calib_gx;
+    sample.gyro_y = calib_gy;
+    sample.gyro_z = calib_gz;
     sample.roll = current_roll;
     sample.pitch = current_pitch;
     sample.timestamp_us = static_cast<std::uint64_t>(esp_timer_get_time());
@@ -274,11 +273,15 @@ bool Monitor::Update(float dt_s) noexcept {
                 result.pitch_sway_pp_mean = 0.0f;
                 result.state = NodeState::IDLE;
                 
-                esp_event_post(MONITOR_EVENT_BASE,
-                               MONITOR_EVENT_RESULT,
-                               &result,
-                               sizeof(result),
-                               0);
+                const esp_err_t post_err = esp_event_post(MONITOR_EVENT_BASE,
+                                                          MONITOR_EVENT_RESULT,
+                                                          &result,
+                                                          sizeof(result),
+                                                          0);
+                if (post_err != ESP_OK) {
+                    ++dropped_result_events_;
+                    ESP_LOGW(kTag, "IDLE result event post failed: %s", esp_err_to_name(post_err));
+                }
                 
                 ESP_LOGI(kTag, "IDLE baseline updated. roll_var=%.3f pitch_var=%.3f",
                          idle_5min_roll_var_, idle_5min_pitch_var_);
@@ -300,110 +303,125 @@ bool Monitor::ReadImu(sensor::lsm6ds3::Value& gyro,
 }
 
 void Monitor::PushSample(float roll, float pitch, float hpf_magnitude) noexcept {
-    std::lock_guard<std::mutex> lock(mutex_);
+    bool should_compute = false;
+    NodeState pub_state = NodeState::IDLE;
+    bool is_exit = false;
 
-    if (short_sample_count_ == kShortBufferSamples) {
-        const float old_roll = roll_short_[short_write_index_];
-        const float old_pitch = pitch_short_[short_write_index_];
-        roll_short_sum_ -= old_roll;
-        roll_short_sq_sum_ -= (old_roll * old_roll);
-        pitch_short_sum_ -= old_pitch;
-        pitch_short_sq_sum_ -= (old_pitch * old_pitch);
-    } else {
-        ++short_sample_count_;
-    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
 
-    roll_short_[short_write_index_] = roll;
-    pitch_short_[short_write_index_] = pitch;
-    roll_short_sum_ += roll;
-    roll_short_sq_sum_ += (roll * roll);
-    pitch_short_sum_ += pitch;
-    pitch_short_sq_sum_ += (pitch * pitch);
-
-    short_write_index_ = (short_write_index_ + 1U) % kShortBufferSamples;
-
-    const float hpf_threshold = static_cast<float>(CONFIG_MONITOR_HPF_THRESHOLD_X1000) / 1000.0f;
-
-    if (hpf_settle_counter_ < static_cast<float>(CONFIG_MONITOR_HPF_SETTLE_SAMPLES)) {
-        hpf_settle_counter_ += 1.0f;
-
-        roll_history_[write_index_] = roll;
-        pitch_history_[write_index_] = pitch;
-        write_index_ = (write_index_ + 1U) % kStorageSamples;
-        if (sample_count_ < kStorageSamples) {
-            ++sample_count_;
-        }
-        return;
-    }
-
-    if (state_ == NodeState::IDLE) {
-        roll_history_[write_index_] = roll;
-        pitch_history_[write_index_] = pitch;
-        write_index_ = (write_index_ + 1U) % kStorageSamples;
-        if (sample_count_ < kStorageSamples) {
-            ++sample_count_;
-        }
-
-        if (hpf_magnitude > hpf_threshold) {
-            state_ = NodeState::DISTURBED;
-
-            write_index_ = 0U;
-            sample_count_ = 0U;
-
-            const std::size_t count = short_sample_count_;
-            for (std::size_t i = 0U; i < count; ++i) {
-                const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
-                roll_history_[i] = roll_short_[idx];
-                pitch_history_[i] = pitch_short_[idx];
-            }
-            write_index_ = count;
-            sample_count_ = count;
-
-            disturbed_exit_debounce_counter_ = 0U;
-
-            ESP_LOGI(kTag, "Transition: IDLE -> DISTURBED (hpf_magnitude=%.6f > th=%.6f)",
-                     static_cast<double>(hpf_magnitude), static_cast<double>(hpf_threshold));
-        }
-    } else if (state_ == NodeState::DISTURBED) {
-        roll_history_[write_index_] = roll;
-        pitch_history_[write_index_] = pitch;
-        write_index_ = (write_index_ + 1U) % kStorageSamples;
-        if (sample_count_ < kStorageSamples) {
-            ++sample_count_;
-        }
-
-        bool transitioned = false;
-        if (hpf_magnitude < hpf_threshold) {
-            ++disturbed_exit_debounce_counter_;
-            if (disturbed_exit_debounce_counter_ >= static_cast<std::size_t>(CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE)) {
-                state_ = NodeState::IDLE;
-                transitioned = true;
-
-                ESP_LOGI(kTag, "Transition: DISTURBED -> IDLE (hpf_magnitude=%.6f < th=%.6f)",
-                         static_cast<double>(hpf_magnitude), static_cast<double>(hpf_threshold));
-
-                static_cast<void>(ComputeAndPublish(NodeState::DISTURBED, true));
-            }
+        if (short_sample_count_ == kShortBufferSamples) {
+            const float old_roll = roll_short_[short_write_index_];
+            const float old_pitch = pitch_short_[short_write_index_];
+            roll_short_sum_ -= old_roll;
+            roll_short_sq_sum_ -= (old_roll * old_roll);
+            pitch_short_sum_ -= old_pitch;
+            pitch_short_sq_sum_ -= (old_pitch * old_pitch);
         } else {
-            disturbed_exit_debounce_counter_ = 0U;
+            ++short_sample_count_;
         }
 
-        if (!transitioned && sample_count_ >= (kStorageSamples - static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD))) {
-            static_cast<void>(ComputeAndPublish(NodeState::DISTURBED, false));
-            ESP_LOGI(kTag, "DISTURBED Buffer Refreshed");
+        roll_short_[short_write_index_] = roll;
+        pitch_short_[short_write_index_] = pitch;
+        roll_short_sum_ += roll;
+        roll_short_sq_sum_ += (roll * roll);
+        pitch_short_sum_ += pitch;
+        pitch_short_sq_sum_ += (pitch * pitch);
 
-            write_index_ = 0U;
-            sample_count_ = 0U;
+        short_write_index_ = (short_write_index_ + 1U) % kShortBufferSamples;
 
-            const std::size_t count = short_sample_count_;
-            for (std::size_t i = 0U; i < count; ++i) {
-                const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
-                roll_history_[i] = roll_short_[idx];
-                pitch_history_[i] = pitch_short_[idx];
+        const float hpf_threshold = static_cast<float>(CONFIG_MONITOR_HPF_THRESHOLD_X1000) / 1000.0f;
+
+        if (hpf_settle_counter_ < static_cast<float>(CONFIG_MONITOR_HPF_SETTLE_SAMPLES)) {
+            hpf_settle_counter_ += 1.0f;
+
+            roll_history_[write_index_] = roll;
+            pitch_history_[write_index_] = pitch;
+            write_index_ = (write_index_ + 1U) % kStorageSamples;
+            if (sample_count_ < kStorageSamples) {
+                ++sample_count_;
             }
-            write_index_ = count;
-            sample_count_ = count;
+            return;
         }
+
+        if (state_ == NodeState::IDLE) {
+            roll_history_[write_index_] = roll;
+            pitch_history_[write_index_] = pitch;
+            write_index_ = (write_index_ + 1U) % kStorageSamples;
+            if (sample_count_ < kStorageSamples) {
+                ++sample_count_;
+            }
+
+            if (hpf_magnitude > hpf_threshold) {
+                state_ = NodeState::DISTURBED;
+
+                write_index_ = 0U;
+                sample_count_ = 0U;
+
+                const std::size_t count = short_sample_count_;
+                for (std::size_t i = 0U; i < count; ++i) {
+                    const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
+                    roll_history_[i] = roll_short_[idx];
+                    pitch_history_[i] = pitch_short_[idx];
+                }
+                write_index_ = count;
+                sample_count_ = count;
+
+                disturbed_exit_debounce_counter_ = 0U;
+
+                ESP_LOGI(kTag, "Transition: IDLE -> DISTURBED (hpf_magnitude=%.6f > th=%.6f)",
+                         static_cast<double>(hpf_magnitude), static_cast<double>(hpf_threshold));
+            }
+        } else if (state_ == NodeState::DISTURBED) {
+            roll_history_[write_index_] = roll;
+            pitch_history_[write_index_] = pitch;
+            write_index_ = (write_index_ + 1U) % kStorageSamples;
+            if (sample_count_ < kStorageSamples) {
+                ++sample_count_;
+            }
+
+            bool transitioned = false;
+            if (hpf_magnitude < hpf_threshold) {
+                ++disturbed_exit_debounce_counter_;
+                if (disturbed_exit_debounce_counter_ >= static_cast<std::size_t>(CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE)) {
+                    state_ = NodeState::IDLE;
+                    transitioned = true;
+
+                    ESP_LOGI(kTag, "Transition: DISTURBED -> IDLE (hpf_magnitude=%.6f < th=%.6f)",
+                             static_cast<double>(hpf_magnitude), static_cast<double>(hpf_threshold));
+
+                    should_compute = true;
+                    pub_state = NodeState::DISTURBED;
+                    is_exit = true;
+                }
+            } else {
+                disturbed_exit_debounce_counter_ = 0U;
+            }
+
+            if (!transitioned && sample_count_ >= (kStorageSamples - static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD))) {
+                ESP_LOGI(kTag, "DISTURBED Buffer Refreshed");
+
+                write_index_ = 0U;
+                sample_count_ = 0U;
+
+                const std::size_t count = short_sample_count_;
+                for (std::size_t i = 0U; i < count; ++i) {
+                    const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
+                    roll_history_[i] = roll_short_[idx];
+                    pitch_history_[i] = pitch_short_[idx];
+                }
+                write_index_ = count;
+                sample_count_ = count;
+
+                should_compute = true;
+                pub_state = NodeState::DISTURBED;
+                is_exit = false;
+            }
+        }
+    } // mutex_ released here
+
+    if (should_compute) {
+        static_cast<void>(ComputeAndPublish(pub_state, is_exit));
     }
 }
 
@@ -425,26 +443,26 @@ bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
 #if CONFIG_MONITOR_DEBUG_DUMP
             const std::int64_t modal_start_us = esp_timer_get_time();
 #endif
-            ModalAxisResult roll_modal = AnalyzeModalAxis(roll_history_);
-            ModalAxisResult pitch_modal = AnalyzeModalAxis(pitch_history_);
+            AnalyzeModalAxis(roll_history_, roll_modal_scratch_);
+            AnalyzeModalAxis(pitch_history_, pitch_modal_scratch_);
 
-            result.natural_freq_roll_hz = roll_modal.natural_freq_hz;
-            result.natural_freq_pitch_hz = pitch_modal.natural_freq_hz;
+            result.natural_freq_roll_hz = roll_modal_scratch_.natural_freq_hz;
+            result.natural_freq_pitch_hz = pitch_modal_scratch_.natural_freq_hz;
             result.natural_freq_hz = std::max(result.natural_freq_roll_hz, result.natural_freq_pitch_hz);
 
-            result.roll_damping_ratio = roll_modal.damping_ratio;
-            result.pitch_damping_ratio = pitch_modal.damping_ratio;
+            result.roll_damping_ratio = roll_modal_scratch_.damping_ratio;
+            result.pitch_damping_ratio = pitch_modal_scratch_.damping_ratio;
 
 #if CONFIG_MONITOR_DEBUG_DUMP
             const std::int64_t modal_elapsed_us = esp_timer_get_time() - modal_start_us;
             ESP_LOGI(kTag, "Modal analysis elapsed=%lldus roll_pairs=%u pitch_pairs=%u",
                      static_cast<long long>(modal_elapsed_us),
-                     static_cast<unsigned>(roll_modal.centerline_pairs.count),
-                     static_cast<unsigned>(pitch_modal.centerline_pairs.count));
-            DumpDebugToSD(roll_modal, pitch_modal,
-                          result.natural_freq_roll_hz, result.natural_freq_pitch_hz,
-                          result.roll_damping_ratio, result.pitch_damping_ratio,
-                          modal_elapsed_us);
+                     static_cast<unsigned>(roll_modal_scratch_.centerline_pairs.count),
+                     static_cast<unsigned>(pitch_modal_scratch_.centerline_pairs.count));
+            DumpDebugToSD(roll_modal_scratch_, pitch_modal_scratch_,
+                           result.natural_freq_roll_hz, result.natural_freq_pitch_hz,
+                           result.roll_damping_ratio, result.pitch_damping_ratio,
+                           modal_elapsed_us);
 #endif
         } else {
             result.natural_freq_roll_hz = 0.0f;
@@ -476,11 +494,16 @@ bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
              static_cast<unsigned long long>(result.timestamp_us),
              static_cast<int>(result.state));
 
-    esp_event_post(MONITOR_EVENT_BASE,
-                   MONITOR_EVENT_RESULT,
-                   &result,
-                   sizeof(result),
-                   0);
+    const esp_err_t post_err = esp_event_post(MONITOR_EVENT_BASE,
+                                              MONITOR_EVENT_RESULT,
+                                              &result,
+                                              sizeof(result),
+                                              0);
+    if (post_err != ESP_OK) {
+        ++dropped_result_events_;
+        ESP_LOGW(kTag, "Result event post failed: %s", esp_err_to_name(post_err));
+        return false;
+    }
 
     return true;
 }
@@ -987,39 +1010,38 @@ float Monitor::ComputeResidualNaturalFrequency(const float* residual, std::size_
         ((static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(kFftWindowSamples));
 }
 
-Monitor::ModalAxisResult Monitor::AnalyzeModalAxis(const std::array<float, kStorageSamples>& data) noexcept {
-    ModalAxisResult result{};
+void Monitor::AnalyzeModalAxis(const std::array<float, kStorageSamples>& data, ModalAxisResult& out) noexcept {
+    out = ModalAxisResult{};
     const std::size_t count = BufferSize();
     if (count < 3U) {
-        return result;
+        return;
     }
 
-    static_cast<void>(DetectRawExtrema(data, 0U, count, result.raw_extrema));
-    static_cast<void>(CollapseExtremaLobes(result.raw_extrema, result.collapsed_extrema));
-    static_cast<void>(BuildCenterlinePairs(result.collapsed_extrema, result.centerline_pairs));
-    static_cast<void>(SelectPairEnvelope(result.centerline_pairs, result.pair_envelope));
+    static_cast<void>(DetectRawExtrema(data, 0U, count, out.raw_extrema));
+    static_cast<void>(CollapseExtremaLobes(out.raw_extrema, out.collapsed_extrema));
+    static_cast<void>(BuildCenterlinePairs(out.collapsed_extrema, out.centerline_pairs));
+    static_cast<void>(SelectPairEnvelope(out.centerline_pairs, out.pair_envelope));
 
-    if (result.pair_envelope.count == 0U || result.centerline_pairs.count < 2U) {
-        return result;
+    if (out.pair_envelope.count == 0U || out.centerline_pairs.count < 2U) {
+        return;
     }
 
-    const float first_time_s = result.pair_envelope.times[0U];
+    const float first_time_s = out.pair_envelope.times[0U];
     const std::size_t start_logical = static_cast<std::size_t>(
         first_time_s * static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ));
     if (start_logical >= count) {
-        return result;
+        return;
     }
 
-    result.decay.start_index = start_logical;
-    result.decay.count = count - start_logical;
-    if (!SubtractCenterline(data, result.decay.start_index, result.decay.count, result.centerline_pairs)) {
-        return result;
+    out.decay.start_index = start_logical;
+    out.decay.count = count - start_logical;
+    if (!SubtractCenterline(data, out.decay.start_index, out.decay.count, out.centerline_pairs)) {
+        return;
     }
 
-    result.residual_count = result.decay.count;
-    result.natural_freq_hz = ComputeResidualNaturalFrequency(residual_scratch_.data(), result.residual_count);
-    result.damping_ratio = ComputeDampingRegression(result.pair_envelope, result.natural_freq_hz);
-    return result;
+    out.residual_count = out.decay.count;
+    out.natural_freq_hz = ComputeResidualNaturalFrequency(residual_scratch_.data(), out.residual_count);
+    out.damping_ratio = ComputeDampingRegression(out.pair_envelope, out.natural_freq_hz);
 }
 
 float Monitor::ComputeAxisNaturalFrequency(const std::array<float, kStorageSamples>& history, std::size_t start_phys_idx, std::size_t count) noexcept {
@@ -1245,9 +1267,14 @@ void Monitor::CheckFailureEvents() noexcept {
     }
 
 #if CONFIG_MONITOR_AE_MODE_GPIO
-    if (ae_gpio_event_) {
-        ae_gpio_event_ = false;
+    std::uint32_t ae_events = 0U;
+    portENTER_CRITICAL(&ae_mux_);
+    ae_events = pending_ae_events_;
+    pending_ae_events_ = 0U;
+    portEXIT_CRITICAL(&ae_mux_);
+    while (ae_events > 0U) {
         PublishFailure(FailureEvent::AcousticEmission);
+        --ae_events;
     }
 #else
     if (!adc_initialized_ || adc_handle_ == nullptr) {
@@ -1270,11 +1297,15 @@ void Monitor::PublishFailure(FailureEvent event) noexcept {
     FailureResult result{};
     result.event = event;
     result.timestamp_us = static_cast<std::uint64_t>(esp_timer_get_time());
-    esp_event_post(MONITOR_EVENT_BASE,
-                   MONITOR_EVENT_FAILURE,
-                   &result,
-                   sizeof(result),
-                   0);
+    const esp_err_t post_err = esp_event_post(MONITOR_EVENT_BASE,
+                                              MONITOR_EVENT_FAILURE,
+                                              &result,
+                                              sizeof(result),
+                                              0);
+    if (post_err != ESP_OK) {
+        ++dropped_failure_events_;
+        ESP_LOGW(kTag, "Failure event post failed: %s", esp_err_to_name(post_err));
+    }
 }
 
 std::size_t Monitor::BufferSize() const noexcept {
@@ -1292,7 +1323,11 @@ std::size_t Monitor::PhysicalIndex(std::size_t logical_index) const noexcept {
 void IRAM_ATTR Monitor::AeGpioIsr(void* arg) noexcept {
     auto* self = static_cast<Monitor*>(arg);
     if (self != nullptr) {
-        self->ae_gpio_event_ = true;
+        portENTER_CRITICAL_ISR(&self->ae_mux_);
+        if (self->pending_ae_events_ < UINT32_MAX) {
+            ++self->pending_ae_events_;
+        }
+        portEXIT_CRITICAL_ISR(&self->ae_mux_);
     }
 }
 
@@ -1331,6 +1366,16 @@ void Monitor::GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, 
             out_samples[i] = stream_samples_[idx];
         }
     }
+}
+
+void Monitor::SetCalibrationBiases(const calibration::CalibrationBias& biases) noexcept {
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open("calib", NVS_READWRITE, &handle);
+    if (err == ESP_OK) {
+        calibration::Calibration::WriteBiases(handle, biases);
+        nvs_close(handle);
+    }
+    calib_bias_ = biases;
 }
 
 #if CONFIG_MONITOR_DEBUG_DUMP

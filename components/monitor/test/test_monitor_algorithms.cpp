@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <functional>
 #include <mutex>
+#include <new>
 #include <span>
 
 #include "unity.h"
@@ -17,6 +18,21 @@
 #undef private
 
 namespace {
+
+monitor::Monitor& MakeMonitorForTest(const monitor::MonitorConfig& config) {
+    alignas(monitor::Monitor) static std::byte storage[sizeof(monitor::Monitor)];
+    static monitor::Monitor* monitor = nullptr;
+
+    sensor::Lsm6ds3::Config imu_cfg{};
+    imu_cfg.read_cb = [](std::uint8_t, std::uint8_t*, std::size_t) { return false; };
+    imu_cfg.write_cb = [](std::uint8_t, const std::uint8_t*, std::size_t) { return false; };
+
+    if (monitor != nullptr) {
+        monitor->~Monitor();
+    }
+    monitor = new (storage) monitor::Monitor{imu_cfg, config};
+    return *monitor;
+}
 
 /* --------------------------------------------------------------------------
    6.1 Adaptive Complementary Filter Tests
@@ -220,31 +236,22 @@ TEST_CASE("calibration bias subtraction math is correct", "[monitor][calib]") {
    -------------------------------------------------------------------------- */
 
 TEST_CASE("monitor members do not include deprecated accel_err fields", "[monitor][fsm]") {
-    using monitor::Monitor;
     using monitor::MonitorConfig;
 
     MonitorConfig config{};
     config.filter_alpha_base = 0.98f;
     config.filter_k_gain = 50.0f;
 
-    sensor::Lsm6ds3::Config imu_cfg{};
-    imu_cfg.read_cb = [](std::uint8_t, std::uint8_t*, std::size_t) { return false; };
-    imu_cfg.write_cb = [](std::uint8_t, const std::uint8_t*, std::size_t) { return false; };
-
-    Monitor monitor{imu_cfg, config};
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+    static_cast<void>(monitor);
     TEST_ASSERT_TRUE(true);
 }
 
 TEST_CASE("hpf settle counter exists and starts at zero", "[monitor][fsm]") {
-    using monitor::Monitor;
     using monitor::MonitorConfig;
 
     MonitorConfig config{};
-    sensor::Lsm6ds3::Config imu_cfg{};
-    imu_cfg.read_cb = [](std::uint8_t, std::uint8_t*, std::size_t) { return false; };
-    imu_cfg.write_cb = [](std::uint8_t, const std::uint8_t*, std::size_t) { return false; };
-
-    Monitor monitor{imu_cfg, config};
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
     TEST_ASSERT_FLOAT_WITHIN(0.0f, 0.0f, monitor.hpf_settle_counter_);
 }
 

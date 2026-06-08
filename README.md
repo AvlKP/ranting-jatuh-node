@@ -22,8 +22,8 @@ main.cpp (app_main)
 
 **Data flow:**
 1. `lsm6ds3` reads accelerometer + gyroscope samples
-2. `monitor` fuses sensor data (complementary filter), runs IDLE/DISTURBED state machine
-3. On DISTURBED→IDLE transition: post-hoc decay analysis (peak envelope, damping ratio via log-linear regression, natural frequency via Welch FFT)
+2. `monitor` fuses sensor data (adaptive complementary filter), runs IDLE/DISTURBED state machine
+3. On DISTURBED->IDLE transition: post-hoc centerline modal analysis (lobe-collapsed extrema, residual FFT, damping ratio via log-linear regression)
 4. Failure events: free-fall (hardware interrupt) and acoustic emission (GPIO interrupt or ADC threshold)
 5. `logger` receives results via `esp_event`, writes CSV to SD card, publishes JSON to MQTT
 6. `dashboard` serves real-time HTTP visualization on port 80
@@ -81,9 +81,9 @@ Key Kconfig options (run `idf.py menuconfig`):
 
 ### Complete
 - LSM6DS3 IMU driver (full register map, I2C 400kHz)
-- Complementary filter for roll/pitch orientation
-- IDLE/DISTURBED state machine with adaptive accelerometer-error-variance thresholds
-- Post-hoc decay analysis: peak envelope, damping ratio regression, Welch FFT for natural frequency
+- Adaptive complementary filter for roll/pitch orientation
+- IDLE/DISTURBED state machine with Chebyshev HPF disturbance threshold
+- Post-hoc centerline modal analysis: lobe-collapsed extrema, residual FFT, damping ratio regression
 - Peak-to-peak sway metrics during disturbance
 - Free-fall detection (hardware interrupt)
 - Acoustic emission detection (GPIO interrupt + ADC threshold)
@@ -98,7 +98,7 @@ Key Kconfig options (run `idf.py menuconfig`):
 - MQTT v5 protocol
 
 ### Not Yet Implemented
-- Wind/storm state to trigger sway and damping ratio calculation
+- Production-grade wind/RDT damping estimator
 - IMU FIFO usage to reduce awake time
 - Temperature calibration on IMU
 - Fix 0.01 deg sensor drift

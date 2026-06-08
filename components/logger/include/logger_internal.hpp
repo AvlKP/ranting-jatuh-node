@@ -8,6 +8,7 @@
 namespace logger {
 
 constexpr std::size_t kCsvLineMax = 512U;
+static_assert(kCsvLineMax <= 512U, "Logger CSV/JSON line buffer exceeds bounded stack budget.");
 
 struct CsvLine {
     std::array<char, kCsvLineMax> buffer{};
@@ -26,6 +27,9 @@ struct TimeInfo {
 [[nodiscard]] bool FormatParameterCsv(const monitor::MonitorResult& result,
                                       const TimeInfo& time_info,
                                       CsvLine& line) noexcept;
+[[nodiscard]] bool FormatParameterJson(const monitor::MonitorResult& result,
+                                       const TimeInfo& time_info,
+                                       CsvLine& line) noexcept;
 [[nodiscard]] bool FormatFailureCsv(const monitor::FailureResult& result,
                                     const TimeInfo& time_info,
                                     CsvLine& line) noexcept;

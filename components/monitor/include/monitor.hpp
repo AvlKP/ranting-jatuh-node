@@ -5,6 +5,9 @@
 #include <cstdint>
 #include <mutex>
 #include "sdkconfig.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/portmacro.h"
 #include "nvs.h"
 #include "lsm6ds3.hpp"
 #include "adaptive_complementary_filter.hpp"
@@ -20,6 +23,15 @@ constexpr std::size_t kStorageSamples =
 
 constexpr std::size_t kFftWindowSamples = 1024U;
 constexpr std::size_t kFftOverlapSamples = kFftWindowSamples / 2U;
+
+static_assert(kStorageSamples >= kFftWindowSamples,
+              "Monitor storage window must be >= FFT window.");
+static_assert(kStorageSamples <= 32768U,
+              "Monitor storage window exceeds bounded RAM budget.");
+static_assert(CONFIG_MONITOR_SHORT_BUFFER_SIZE <= 1024,
+              "Monitor short buffer exceeds bounded RAM budget.");
+static_assert(CONFIG_MONITOR_N_DPAD < kStorageSamples,
+              "DISTURBED refresh margin must be smaller than storage window.");
 
 struct StreamSample {
     float accel_x{0.0f};
@@ -100,7 +112,13 @@ public:
     void GetTiltHistory(float* out_roll, float* out_pitch, std::size_t& out_len, std::size_t max_len) const noexcept;
     void GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) const noexcept;
     [[nodiscard]] NodeState GetState() const noexcept { return state_; }
+    [[nodiscard]] TaskHandle_t GetTaskHandle() const noexcept { return task_handle_; }
+    [[nodiscard]] std::uint32_t DroppedResultEvents() const noexcept { return dropped_result_events_; }
+    [[nodiscard]] std::uint32_t DroppedFailureEvents() const noexcept { return dropped_failure_events_; }
+    [[nodiscard]] std::uint32_t PendingAeEvents() const noexcept { return pending_ae_events_; }
     void TaskLoop() noexcept;
+
+    void SetCalibrationBiases(const calibration::CalibrationBias& biases) noexcept;
 
 private:
     [[nodiscard]] bool ReadImu(sensor::lsm6ds3::Value& gyro,
@@ -173,7 +191,7 @@ private:
     [[nodiscard]] bool SelectPairEnvelope(const CenterlinePairList& pairs, PeakList& out_envelope) const noexcept;
     [[nodiscard]] FftBinRange SelectFftBinRange(std::size_t fft_size, float sample_rate_hz) const noexcept;
     [[nodiscard]] float ComputeResidualNaturalFrequency(const float* residual, std::size_t count) noexcept;
-    [[nodiscard]] ModalAxisResult AnalyzeModalAxis(const std::array<float, kStorageSamples>& data) noexcept;
+    void AnalyzeModalAxis(const std::array<float, kStorageSamples>& data, ModalAxisResult& out) noexcept;
 
 #if CONFIG_MONITOR_DEBUG_DUMP
     void DumpDebugToSD(const ModalAxisResult& roll_modal, const ModalAxisResult& pitch_modal,
@@ -196,7 +214,7 @@ private:
     nvs_handle_t calib_nvs_handle_{0};
 
     mutable std::mutex mutex_;
-    void* task_handle_{nullptr};
+    TaskHandle_t task_handle_{nullptr};
 
     std::array<float, kStorageSamples> roll_history_{};
     std::array<float, kStorageSamples> pitch_history_{};
@@ -238,11 +256,16 @@ private:
     PeakList roll_peaks_{};
     PeakList pitch_peaks_{};
     std::array<float, kStorageSamples> residual_scratch_{};
+    ModalAxisResult roll_modal_scratch_{};
+    ModalAxisResult pitch_modal_scratch_{};
     bool fft_initialized_{false};
 
     void* adc_handle_{nullptr};
     bool adc_initialized_{false};
-    volatile bool ae_gpio_event_{false};
+    portMUX_TYPE ae_mux_ = portMUX_INITIALIZER_UNLOCKED;
+    std::uint32_t pending_ae_events_{0U};
+    std::uint32_t dropped_result_events_{0U};
+    std::uint32_t dropped_failure_events_{0U};
 
     static constexpr std::size_t kMaxStreamSamples = 20U;
     std::array<StreamSample, kMaxStreamSamples> stream_samples_{};
