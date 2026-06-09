@@ -19,8 +19,8 @@ monitor::MonitorResult MakeResult() {
     result.roll_damping_ratio = 0.0123f;
     result.pitch_damping_ratio = 0.0456f;
     result.natural_freq_hz = 2.500f;
-    result.natural_freq_roll_hz = 2.250f;
-    result.natural_freq_pitch_hz = 2.750f;
+    result.natural_freq_roll_hz = 2.500f;
+    result.natural_freq_pitch_hz = 2.500f;
     result.state = monitor::NodeState::DISTURBED;
     result.sample_count = 3120U;
     result.timestamp_us = 123456789ULL;
@@ -45,6 +45,7 @@ TEST_CASE("logger parameter CSV formatter fits fixed line buffer", "[logger][for
     TEST_ASSERT_LESS_THAN_UINT16(logger::kCsvLineMax, line.length);
     TEST_ASSERT_EQUAL('\n', line.buffer[line.length - 1U]);
     TEST_ASSERT_NOT_NULL(std::strstr(line.buffer.data(), "DISTURBED"));
+    TEST_ASSERT_NULL(std::strstr(line.buffer.data(), "event_type"));
 }
 
 TEST_CASE("logger parameter JSON formatter fits fixed line buffer", "[logger][format]") {
@@ -56,6 +57,10 @@ TEST_CASE("logger parameter JSON formatter fits fixed line buffer", "[logger][fo
     TEST_ASSERT_LESS_THAN_UINT16(logger::kCsvLineMax, line.length);
     TEST_ASSERT_EQUAL('\n', line.buffer[line.length - 1U]);
     TEST_ASSERT_NOT_NULL(std::strstr(line.buffer.data(), "\"state\":\"DISTURBED\""));
+    TEST_ASSERT_NOT_NULL(std::strstr(line.buffer.data(), "\"natural_freq_hz\":2.500"));
+    TEST_ASSERT_NOT_NULL(std::strstr(line.buffer.data(), "\"natural_freq_roll_hz\":2.500"));
+    TEST_ASSERT_NOT_NULL(std::strstr(line.buffer.data(), "\"natural_freq_pitch_hz\":2.500"));
+    TEST_ASSERT_NULL(std::strstr(line.buffer.data(), "event_type"));
 }
 
 TEST_CASE("logger failure CSV formatter fits fixed line buffer", "[logger][format]") {

@@ -38,6 +38,58 @@ void MonitorTaskEntry(void* arg) noexcept {
 
 } // namespace
 
+bool TkeoWindow::Push(float gmag, float& out_tkeo) noexcept {
+    out_tkeo = 0.0f;
+    if (count_ < samples_.size()) {
+        samples_[count_] = gmag;
+        ++count_;
+        if (count_ < samples_.size()) {
+            return false;
+        }
+    } else {
+        samples_[0U] = samples_[1U];
+        samples_[1U] = samples_[2U];
+        samples_[2U] = gmag;
+    }
+
+    out_tkeo = (samples_[1U] * samples_[1U]) - (samples_[0U] * samples_[2U]);
+    return true;
+}
+
+void TkeoWindow::Reset() noexcept {
+    samples_ = {};
+    count_ = 0U;
+}
+
+void DspDisturbanceDetector::Reset() noexcept {
+    state_ = NodeState::IDLE;
+    quiet_count_ = 0U;
+}
+
+NodeState DspDisturbanceDetector::Update(float gmag, float tkeo, const MonitorConfig& config) noexcept {
+    if (state_ == NodeState::IDLE) {
+        if ((tkeo > config.dsp_tkeo_high) || (gmag > config.dsp_gmag_onset_dps)) {
+            state_ = NodeState::DISTURBED;
+            quiet_count_ = 0U;
+        }
+        return state_;
+    }
+
+    if ((tkeo < config.dsp_tkeo_low) && (gmag < config.dsp_gmag_quiet_dps)) {
+        if (quiet_count_ < config.dsp_quiet_debounce) {
+            ++quiet_count_;
+        }
+        if (quiet_count_ >= config.dsp_quiet_debounce) {
+            state_ = NodeState::IDLE;
+            quiet_count_ = 0U;
+        }
+    } else {
+        quiet_count_ = 0U;
+    }
+
+    return state_;
+}
+
 Monitor::Monitor(const sensor::Lsm6ds3::Config& imu_config,
                  const MonitorConfig& config) noexcept
     : imu_{imu_config},
@@ -187,6 +239,9 @@ bool Monitor::Update(float dt_s) noexcept {
     const std::array<float, 3> gyro_vec{calib_gx, calib_gy, calib_gz};
     hpf_.update(calib_ax, calib_ay, calib_az);
     filter_.update(accel_vec, gyro_vec, dt_s);
+    const float gmag = std::sqrt((calib_gx * calib_gx) + (calib_gy * calib_gy) + (calib_gz * calib_gz));
+    float tkeo = 0.0f;
+    static_cast<void>(tkeo_window_.Push(gmag, tkeo));
 
     float current_roll = filter_.roll();
     float current_pitch = filter_.pitch();
@@ -225,7 +280,7 @@ bool Monitor::Update(float dt_s) noexcept {
     }
 #endif
 
-    PushSample(current_roll, current_pitch, hpf_.magnitude());
+    PushSample(current_roll, current_pitch, gmag, tkeo);
 
     ESP_LOGD(kTag, "Stream: ax=%.3f ay=%.3f az=%.3f gx=%.3f gy=%.3f gz=%.3f r=%.3f p=%.3f",
              calib_ax, calib_ay, calib_az, calib_gx, calib_gy, calib_gz, current_roll, current_pitch);
@@ -302,13 +357,15 @@ bool Monitor::ReadImu(sensor::lsm6ds3::Value& gyro,
     return imu_.read_accel_gyro(gyro, accel);
 }
 
-void Monitor::PushSample(float roll, float pitch, float hpf_magnitude) noexcept {
+void Monitor::PushSample(float roll, float pitch, float gmag, float tkeo) noexcept {
     bool should_compute = false;
     NodeState pub_state = NodeState::IDLE;
     bool is_exit = false;
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const NodeState old_detector_state = dsp_detector_.State();
+        const NodeState new_detector_state = dsp_detector_.Update(gmag, tkeo, config_);
 
         if (short_sample_count_ == kShortBufferSamples) {
             const float old_roll = roll_short_[short_write_index_];
@@ -323,6 +380,7 @@ void Monitor::PushSample(float roll, float pitch, float hpf_magnitude) noexcept 
 
         roll_short_[short_write_index_] = roll;
         pitch_short_[short_write_index_] = pitch;
+        gmag_short_[short_write_index_] = gmag;
         roll_short_sum_ += roll;
         roll_short_sq_sum_ += (roll * roll);
         pitch_short_sum_ += pitch;
@@ -330,29 +388,16 @@ void Monitor::PushSample(float roll, float pitch, float hpf_magnitude) noexcept 
 
         short_write_index_ = (short_write_index_ + 1U) % kShortBufferSamples;
 
-        const float hpf_threshold = static_cast<float>(CONFIG_MONITOR_HPF_THRESHOLD_X1000) / 1000.0f;
-
-        if (hpf_settle_counter_ < static_cast<float>(CONFIG_MONITOR_HPF_SETTLE_SAMPLES)) {
-            hpf_settle_counter_ += 1.0f;
-
-            roll_history_[write_index_] = roll;
-            pitch_history_[write_index_] = pitch;
-            write_index_ = (write_index_ + 1U) % kStorageSamples;
-            if (sample_count_ < kStorageSamples) {
-                ++sample_count_;
-            }
-            return;
-        }
-
         if (state_ == NodeState::IDLE) {
             roll_history_[write_index_] = roll;
             pitch_history_[write_index_] = pitch;
+            gmag_history_[write_index_] = gmag;
             write_index_ = (write_index_ + 1U) % kStorageSamples;
             if (sample_count_ < kStorageSamples) {
                 ++sample_count_;
             }
 
-            if (hpf_magnitude > hpf_threshold) {
+            if ((old_detector_state == NodeState::IDLE) && (new_detector_state == NodeState::DISTURBED)) {
                 state_ = NodeState::DISTURBED;
 
                 write_index_ = 0U;
@@ -363,39 +408,37 @@ void Monitor::PushSample(float roll, float pitch, float hpf_magnitude) noexcept 
                     const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
                     roll_history_[i] = roll_short_[idx];
                     pitch_history_[i] = pitch_short_[idx];
+                    gmag_history_[i] = gmag_short_[idx];
                 }
                 write_index_ = count;
                 sample_count_ = count;
 
                 disturbed_exit_debounce_counter_ = 0U;
 
-                ESP_LOGI(kTag, "Transition: IDLE -> DISTURBED (hpf_magnitude=%.6f > th=%.6f)",
-                         static_cast<double>(hpf_magnitude), static_cast<double>(hpf_threshold));
+                ESP_LOGI(kTag, "Transition: IDLE -> DISTURBED (gmag=%.6f tkeo=%.6f)",
+                         static_cast<double>(gmag), static_cast<double>(tkeo));
             }
         } else if (state_ == NodeState::DISTURBED) {
             roll_history_[write_index_] = roll;
             pitch_history_[write_index_] = pitch;
+            gmag_history_[write_index_] = gmag;
             write_index_ = (write_index_ + 1U) % kStorageSamples;
             if (sample_count_ < kStorageSamples) {
                 ++sample_count_;
             }
 
             bool transitioned = false;
-            if (hpf_magnitude < hpf_threshold) {
-                ++disturbed_exit_debounce_counter_;
-                if (disturbed_exit_debounce_counter_ >= static_cast<std::size_t>(CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE)) {
-                    state_ = NodeState::IDLE;
-                    transitioned = true;
+            disturbed_exit_debounce_counter_ = dsp_detector_.QuietCount();
+            if ((old_detector_state == NodeState::DISTURBED) && (new_detector_state == NodeState::IDLE)) {
+                state_ = NodeState::IDLE;
+                transitioned = true;
 
-                    ESP_LOGI(kTag, "Transition: DISTURBED -> IDLE (hpf_magnitude=%.6f < th=%.6f)",
-                             static_cast<double>(hpf_magnitude), static_cast<double>(hpf_threshold));
+                ESP_LOGI(kTag, "Transition: DISTURBED -> IDLE (gmag=%.6f tkeo=%.6f)",
+                         static_cast<double>(gmag), static_cast<double>(tkeo));
 
-                    should_compute = true;
-                    pub_state = NodeState::DISTURBED;
-                    is_exit = true;
-                }
-            } else {
-                disturbed_exit_debounce_counter_ = 0U;
+                should_compute = true;
+                pub_state = NodeState::DISTURBED;
+                is_exit = true;
             }
 
             if (!transitioned && sample_count_ >= (kStorageSamples - static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD))) {
@@ -409,6 +452,7 @@ void Monitor::PushSample(float roll, float pitch, float hpf_magnitude) noexcept 
                     const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
                     roll_history_[i] = roll_short_[idx];
                     pitch_history_[i] = pitch_short_[idx];
+                    gmag_history_[i] = gmag_short_[idx];
                 }
                 write_index_ = count;
                 sample_count_ = count;
@@ -446,12 +490,14 @@ bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
             AnalyzeModalAxis(roll_history_, roll_modal_scratch_);
             AnalyzeModalAxis(pitch_history_, pitch_modal_scratch_);
 
-            result.natural_freq_roll_hz = roll_modal_scratch_.natural_freq_hz;
-            result.natural_freq_pitch_hz = pitch_modal_scratch_.natural_freq_hz;
-            result.natural_freq_hz = std::max(result.natural_freq_roll_hz, result.natural_freq_pitch_hz);
+            result.natural_freq_hz = ComputeGmagNaturalFrequency();
+            result.natural_freq_roll_hz = result.natural_freq_hz;
+            result.natural_freq_pitch_hz = result.natural_freq_hz;
 
-            result.roll_damping_ratio = roll_modal_scratch_.damping_ratio;
-            result.pitch_damping_ratio = pitch_modal_scratch_.damping_ratio;
+            result.roll_damping_ratio = ComputeDampingRegression(roll_modal_scratch_.pair_envelope,
+                                                                 result.natural_freq_hz);
+            result.pitch_damping_ratio = ComputeDampingRegression(pitch_modal_scratch_.pair_envelope,
+                                                                  result.natural_freq_hz);
 
 #if CONFIG_MONITOR_DEBUG_DUMP
             const std::int64_t modal_elapsed_us = esp_timer_get_time() - modal_start_us;
@@ -1329,6 +1375,14 @@ void IRAM_ATTR Monitor::AeGpioIsr(void* arg) noexcept {
         }
         portEXIT_CRITICAL_ISR(&self->ae_mux_);
     }
+}
+
+float Monitor::ComputeGmagNaturalFrequency() noexcept {
+    const std::size_t count = BufferSize();
+    if (count < 3U) {
+        return 0.0f;
+    }
+    return ComputeAxisNaturalFrequency(gmag_history_, StartIndex(), count);
 }
 
 void Monitor::GetFftData(float* out_psd, std::size_t& out_len) const noexcept {

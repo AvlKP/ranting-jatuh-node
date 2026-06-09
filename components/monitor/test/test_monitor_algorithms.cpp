@@ -255,4 +255,147 @@ TEST_CASE("hpf settle counter exists and starts at zero", "[monitor][fsm]") {
     TEST_ASSERT_FLOAT_WITHIN(0.0f, 0.0f, monitor.hpf_settle_counter_);
 }
 
+TEST_CASE("tkeo startup is bounded until three samples", "[monitor][dsp]") {
+    monitor::TkeoWindow window{};
+    float tkeo = -1.0f;
+
+    TEST_ASSERT_FALSE(window.Push(1.0f, tkeo));
+    TEST_ASSERT_FLOAT_WITHIN(0.0f, 0.0f, tkeo);
+    TEST_ASSERT_FALSE(window.Push(2.0f, tkeo));
+    TEST_ASSERT_FLOAT_WITHIN(0.0f, 0.0f, tkeo);
+    TEST_ASSERT_EQUAL_UINT(2U, window.Count());
+}
+
+TEST_CASE("tkeo computes middle sample energy with one sample latency", "[monitor][dsp]") {
+    monitor::TkeoWindow window{};
+    float tkeo = 0.0f;
+
+    TEST_ASSERT_FALSE(window.Push(1.0f, tkeo));
+    TEST_ASSERT_FALSE(window.Push(2.0f, tkeo));
+    TEST_ASSERT_TRUE(window.Push(3.0f, tkeo));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 1.0f, tkeo);
+
+    TEST_ASSERT_TRUE(window.Push(4.0f, tkeo));
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 4.0f, tkeo);
+}
+
+TEST_CASE("dsp detector enters on tkeo or gmag and exits after quiet debounce", "[monitor][dsp]") {
+    monitor::MonitorConfig config{};
+    config.dsp_tkeo_high = 40.0f;
+    config.dsp_tkeo_low = 5.0f;
+    config.dsp_gmag_onset_dps = 2.0f;
+    config.dsp_gmag_quiet_dps = 1.5f;
+    config.dsp_quiet_debounce = 3U;
+
+    monitor::DspDisturbanceDetector detector{};
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::NodeState::DISTURBED),
+                            static_cast<std::uint8_t>(detector.Update(1.0f, 41.0f, config)));
+    TEST_ASSERT_EQUAL_UINT(0U, detector.QuietCount());
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::NodeState::DISTURBED),
+                            static_cast<std::uint8_t>(detector.Update(1.0f, 1.0f, config)));
+    TEST_ASSERT_EQUAL_UINT(1U, detector.QuietCount());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::NodeState::DISTURBED),
+                            static_cast<std::uint8_t>(detector.Update(1.0f, 1.0f, config)));
+    TEST_ASSERT_EQUAL_UINT(2U, detector.QuietCount());
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::NodeState::IDLE),
+                            static_cast<std::uint8_t>(detector.Update(1.0f, 1.0f, config)));
+}
+
+TEST_CASE("dsp detector quiet debounce resets on renewed disturbance", "[monitor][dsp]") {
+    monitor::MonitorConfig config{};
+    config.dsp_tkeo_high = 40.0f;
+    config.dsp_tkeo_low = 5.0f;
+    config.dsp_gmag_onset_dps = 2.0f;
+    config.dsp_gmag_quiet_dps = 1.5f;
+    config.dsp_quiet_debounce = 3U;
+
+    monitor::DspDisturbanceDetector detector{};
+    static_cast<void>(detector.Update(2.1f, 0.0f, config));
+    static_cast<void>(detector.Update(1.0f, 1.0f, config));
+    TEST_ASSERT_EQUAL_UINT(1U, detector.QuietCount());
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::NodeState::DISTURBED),
+                            static_cast<std::uint8_t>(detector.Update(1.6f, 1.0f, config)));
+    TEST_ASSERT_EQUAL_UINT(0U, detector.QuietCount());
+}
+
+TEST_CASE("disturbance buffers stay within configured storage bounds", "[monitor][dsp]") {
+    monitor::MonitorConfig config{};
+    config.dsp_tkeo_high = 40.0f;
+    config.dsp_tkeo_low = 5.0f;
+    config.dsp_gmag_onset_dps = 2.0f;
+    config.dsp_gmag_quiet_dps = 1.5f;
+    config.dsp_quiet_debounce = 3U;
+
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+    monitor.PushSample(0.0f, 0.0f, 3.0f, 0.0f);
+
+    const std::size_t pushes = monitor::kStorageSamples + static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD) + 8U;
+    for (std::size_t i = 0U; i < pushes; ++i) {
+        const float sample = static_cast<float>(i & 0x0FU);
+        monitor.PushSample(sample, -sample, 3.0f, 10.0f);
+        TEST_ASSERT_TRUE(monitor.sample_count_ <= monitor::kStorageSamples);
+        TEST_ASSERT_TRUE(monitor.write_index_ < monitor::kStorageSamples);
+    }
+}
+
+TEST_CASE("raw_log_7 reduced replay enters disturbance after calibrated gyro spike", "[monitor][dsp][replay]") {
+    struct RawLogRow {
+        float gx;
+        float gy;
+        float gz;
+    };
+
+    constexpr RawLogRow kRows[] = {
+        {1.198750f, -2.572500f, 0.761250f},
+        {1.207500f, -2.572500f, 0.743750f},
+        {1.198750f, -2.572500f, 0.717500f},
+        {1.198750f, -2.572500f, 0.717500f},
+        {1.207500f, -2.555000f, 0.752500f},
+        {2.826250f, -4.392500f, 1.365000f},
+        {2.826250f, -4.392500f, 1.365000f},
+        {2.511250f, -4.138750f, 0.638750f},
+        {2.773750f, -4.628750f, 0.542500f},
+        {3.080000f, -4.873750f, 0.778750f},
+    };
+
+    monitor::MonitorConfig config{};
+    config.dsp_tkeo_high = 40.0f;
+    config.dsp_tkeo_low = 5.0f;
+    config.dsp_gmag_onset_dps = 2.0f;
+    config.dsp_gmag_quiet_dps = 1.5f;
+    config.dsp_quiet_debounce = 3U;
+
+    const RawLogRow bias = kRows[0U];
+    monitor::DspDisturbanceDetector detector{};
+    monitor::TkeoWindow tkeo_window{};
+    float tkeo = 0.0f;
+
+    for (std::size_t i = 0U; i < 5U; ++i) {
+        const float gx = kRows[i].gx - bias.gx;
+        const float gy = kRows[i].gy - bias.gy;
+        const float gz = kRows[i].gz - bias.gz;
+        const float gmag = std::sqrt((gx * gx) + (gy * gy) + (gz * gz));
+        static_cast<void>(tkeo_window.Push(gmag, tkeo));
+        TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::NodeState::IDLE),
+                                static_cast<std::uint8_t>(detector.Update(gmag, tkeo, config)));
+    }
+
+    bool entered = false;
+    for (std::size_t i = 5U; i < (sizeof(kRows) / sizeof(kRows[0U])); ++i) {
+        const float gx = kRows[i].gx - bias.gx;
+        const float gy = kRows[i].gy - bias.gy;
+        const float gz = kRows[i].gz - bias.gz;
+        const float gmag = std::sqrt((gx * gx) + (gy * gy) + (gz * gz));
+        static_cast<void>(tkeo_window.Push(gmag, tkeo));
+        entered = detector.Update(gmag, tkeo, config) == monitor::NodeState::DISTURBED;
+        if (entered) {
+            break;
+        }
+    }
+
+    TEST_ASSERT_TRUE(entered);
+}
+
 } // namespace

@@ -172,3 +172,22 @@ TEST_CASE("drifting baseline modal analysis finds nonzero frequency", "[monitor]
     TEST_ASSERT_TRUE(result.natural_freq_hz >= 0.5f);
     TEST_ASSERT_TRUE(result.natural_freq_hz <= 25.0f);
 }
+
+TEST_CASE("gmag FFT finds known frequency inside modal band", "[monitor][modal][dsp]") {
+    MonitorConfig config{};
+    config.modal_freq_min_hz = 0.5f;
+    config.modal_freq_max_hz = 12.0f;
+    Monitor& monitor = MakeMonitor(config);
+
+    constexpr float kSignalHz = 2.0f;
+    constexpr std::size_t kCount = 512U;
+    for (std::size_t i = 0U; i < kCount; ++i) {
+        const float t = static_cast<float>(i) / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+        monitor.gmag_history_[i] = 4.0f + std::sin(2.0f * 3.14159265358979323846f * kSignalHz * t);
+    }
+    monitor.write_index_ = kCount;
+    monitor.sample_count_ = kCount;
+
+    const float freq = monitor.ComputeGmagNaturalFrequency();
+    TEST_ASSERT_FLOAT_WITHIN(0.15f, kSignalHz, freq);
+}

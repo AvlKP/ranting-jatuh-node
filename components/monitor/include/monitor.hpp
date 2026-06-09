@@ -57,6 +57,11 @@ struct MonitorConfig {
     float centerline_lobe_reversal_deg{static_cast<float>(CONFIG_MONITOR_CENTERLINE_LOBE_REVERSAL_X100) / 100.0f};
     float modal_freq_min_hz{static_cast<float>(CONFIG_MONITOR_MODAL_FREQ_MIN_HZ_X10) / 10.0f};
     float modal_freq_max_hz{static_cast<float>(CONFIG_MONITOR_MODAL_FREQ_MAX_HZ_X10) / 10.0f};
+    float dsp_tkeo_high{static_cast<float>(CONFIG_MONITOR_DSP_TKEO_HIGH_X10) / 10.0f};
+    float dsp_tkeo_low{static_cast<float>(CONFIG_MONITOR_DSP_TKEO_LOW_X10) / 10.0f};
+    float dsp_gmag_onset_dps{static_cast<float>(CONFIG_MONITOR_DSP_GMAG_ONSET_X100) / 100.0f};
+    float dsp_gmag_quiet_dps{static_cast<float>(CONFIG_MONITOR_DSP_GMAG_QUIET_X100) / 100.0f};
+    std::size_t dsp_quiet_debounce{static_cast<std::size_t>(CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE)};
 };
 
 enum class NodeState : std::uint8_t {
@@ -97,6 +102,29 @@ struct FailureResult {
 
 using FailureCb = void(*)(void* ctx, const FailureResult& result);
 
+class TkeoWindow {
+public:
+    [[nodiscard]] bool Push(float gmag, float& out_tkeo) noexcept;
+    void Reset() noexcept;
+    [[nodiscard]] std::size_t Count() const noexcept { return count_; }
+
+private:
+    std::array<float, 3U> samples_{};
+    std::size_t count_{0U};
+};
+
+class DspDisturbanceDetector {
+public:
+    void Reset() noexcept;
+    [[nodiscard]] NodeState Update(float gmag, float tkeo, const MonitorConfig& config) noexcept;
+    [[nodiscard]] NodeState State() const noexcept { return state_; }
+    [[nodiscard]] std::size_t QuietCount() const noexcept { return quiet_count_; }
+
+private:
+    NodeState state_{NodeState::IDLE};
+    std::size_t quiet_count_{0U};
+};
+
 class Monitor {
 public:
     explicit Monitor(const sensor::Lsm6ds3::Config& imu_config,
@@ -123,11 +151,12 @@ public:
 private:
     [[nodiscard]] bool ReadImu(sensor::lsm6ds3::Value& gyro,
                                sensor::lsm6ds3::Value& accel) noexcept;
-    void PushSample(float roll, float pitch, float hpf_magnitude) noexcept;
+    void PushSample(float roll, float pitch, float gmag, float tkeo) noexcept;
     [[nodiscard]] bool ComputeAndPublish(NodeState pub_state, bool is_exit = true) noexcept;
     [[nodiscard]] bool ComputeStats(MonitorResult& result) const noexcept;
     [[nodiscard]] bool ComputeNaturalFrequency(MonitorResult& result) noexcept;
     [[nodiscard]] float ComputeAxisNaturalFrequency(const std::array<float, kStorageSamples>& history, std::size_t start_phys_idx, std::size_t count) noexcept;
+    [[nodiscard]] float ComputeGmagNaturalFrequency() noexcept;
     [[nodiscard]] bool ComputeSwayAndDamping(MonitorResult& result) noexcept;
     
     struct DecayRegion {
@@ -218,12 +247,14 @@ private:
 
     std::array<float, kStorageSamples> roll_history_{};
     std::array<float, kStorageSamples> pitch_history_{};
+    std::array<float, kStorageSamples> gmag_history_{};
     std::size_t write_index_{0U};
     std::size_t sample_count_{0U};
 
     static constexpr std::size_t kShortBufferSamples = static_cast<std::size_t>(CONFIG_MONITOR_SHORT_BUFFER_SIZE);
     std::array<float, kShortBufferSamples> roll_short_{};
     std::array<float, kShortBufferSamples> pitch_short_{};
+    std::array<float, kShortBufferSamples> gmag_short_{};
     std::size_t short_write_index_{0U};
     std::size_t short_sample_count_{0U};
 
@@ -236,6 +267,8 @@ private:
     float hpf_settle_counter_{0.0f};
 
     std::size_t disturbed_exit_debounce_counter_{0U};
+    TkeoWindow tkeo_window_{};
+    DspDisturbanceDetector dsp_detector_{};
 
 
     NodeState state_{NodeState::IDLE};
