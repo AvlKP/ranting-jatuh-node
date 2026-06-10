@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdio>
 #include <algorithm>
+#include <cstring>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -75,14 +76,20 @@ NodeState DspDisturbanceDetector::Update(float gmag, float tkeo, const MonitorCo
         return state_;
     }
 
-    if ((tkeo < config.dsp_tkeo_low) && (gmag < config.dsp_gmag_quiet_dps)) {
-        if (quiet_count_ < config.dsp_quiet_debounce) {
-            ++quiet_count_;
-        }
-        if (quiet_count_ >= config.dsp_quiet_debounce) {
-            state_ = NodeState::IDLE;
+    if (quiet_count_ > 0U) {
+        if ((tkeo > config.dsp_tkeo_high) || (gmag >= config.dsp_gmag_quiet_dps)) {
             quiet_count_ = 0U;
+        } else if ((tkeo < config.dsp_tkeo_low) && (gmag < config.dsp_gmag_quiet_dps)) {
+            if (quiet_count_ < config.dsp_quiet_debounce) {
+                ++quiet_count_;
+            }
+            if (quiet_count_ >= config.dsp_quiet_debounce) {
+                state_ = NodeState::IDLE;
+                quiet_count_ = 0U;
+            }
         }
+    } else if ((tkeo < config.dsp_tkeo_low) && (gmag < config.dsp_gmag_quiet_dps)) {
+        quiet_count_ = 1U;
     } else {
         quiet_count_ = 0U;
     }
@@ -237,7 +244,6 @@ bool Monitor::Update(float dt_s) noexcept {
 
     const std::array<float, 3> accel_vec{calib_ax, calib_ay, calib_az};
     const std::array<float, 3> gyro_vec{calib_gx, calib_gy, calib_gz};
-    hpf_.update(calib_ax, calib_ay, calib_az);
     filter_.update(accel_vec, gyro_vec, dt_s);
     const float gmag = std::sqrt((calib_gx * calib_gx) + (calib_gy * calib_gy) + (calib_gz * calib_gz));
     float tkeo = 0.0f;
@@ -280,7 +286,10 @@ bool Monitor::Update(float dt_s) noexcept {
     }
 #endif
 
-    PushSample(current_roll, current_pitch, gmag, tkeo);
+    PushSample(current_roll, current_pitch,
+               calib_gx, calib_gy, calib_gz,
+               calib_ax, calib_ay, calib_az,
+               gmag, tkeo);
 
     ESP_LOGD(kTag, "Stream: ax=%.3f ay=%.3f az=%.3f gx=%.3f gy=%.3f gz=%.3f r=%.3f p=%.3f",
              calib_ax, calib_ay, calib_az, calib_gx, calib_gy, calib_gz, current_roll, current_pitch);
@@ -357,8 +366,12 @@ bool Monitor::ReadImu(sensor::lsm6ds3::Value& gyro,
     return imu_.read_accel_gyro(gyro, accel);
 }
 
-void Monitor::PushSample(float roll, float pitch, float gmag, float tkeo) noexcept {
+void Monitor::PushSample(float roll, float pitch,
+                         float gx, float gy, float gz,
+                         float ax, float ay, float az,
+                         float gmag, float tkeo) noexcept {
     bool should_compute = false;
+    bool should_reset_after_compute = false;
     NodeState pub_state = NodeState::IDLE;
     bool is_exit = false;
 
@@ -366,6 +379,51 @@ void Monitor::PushSample(float roll, float pitch, float gmag, float tkeo) noexce
         std::lock_guard<std::mutex> lock(mutex_);
         const NodeState old_detector_state = dsp_detector_.State();
         const NodeState new_detector_state = dsp_detector_.Update(gmag, tkeo, config_);
+
+        auto write_history = [this](std::size_t idx,
+                                    float r, float p,
+                                    float gx_v, float gy_v, float gz_v,
+                                    float ax_v, float ay_v, float az_v,
+                                    float gm) {
+            roll_history_[idx] = r;
+            pitch_history_[idx] = p;
+            if (idx < kEventSamples) {
+                gx_history_[idx] = gx_v;
+                gy_history_[idx] = gy_v;
+                gz_history_[idx] = gz_v;
+                ax_history_[idx] = ax_v;
+                ay_history_[idx] = ay_v;
+                az_history_[idx] = az_v;
+            }
+            gmag_history_[idx] = gm;
+        };
+
+        auto append_history = [&write_history, this](float r, float p,
+                                                     float gx_v, float gy_v, float gz_v,
+                                                     float ax_v, float ay_v, float az_v,
+                                                     float gm) {
+            write_history(write_index_, r, p, gx_v, gy_v, gz_v, ax_v, ay_v, az_v, gm);
+            write_index_ = (write_index_ + 1U) % kStorageSamples;
+            if (sample_count_ < kStorageSamples) {
+                ++sample_count_;
+            }
+        };
+
+        auto reset_from_short = [&write_history, this]() {
+            write_index_ = 0U;
+            sample_count_ = 0U;
+            const std::size_t count = short_sample_count_;
+            for (std::size_t i = 0U; i < count; ++i) {
+                const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
+                write_history(i,
+                              roll_short_[idx], pitch_short_[idx],
+                              gx_short_[idx], gy_short_[idx], gz_short_[idx],
+                              ax_short_[idx], ay_short_[idx], az_short_[idx],
+                              gmag_short_[idx]);
+            }
+            write_index_ = count;
+            sample_count_ = count;
+        };
 
         if (short_sample_count_ == kShortBufferSamples) {
             const float old_roll = roll_short_[short_write_index_];
@@ -380,6 +438,12 @@ void Monitor::PushSample(float roll, float pitch, float gmag, float tkeo) noexce
 
         roll_short_[short_write_index_] = roll;
         pitch_short_[short_write_index_] = pitch;
+        gx_short_[short_write_index_] = gx;
+        gy_short_[short_write_index_] = gy;
+        gz_short_[short_write_index_] = gz;
+        ax_short_[short_write_index_] = ax;
+        ay_short_[short_write_index_] = ay;
+        az_short_[short_write_index_] = az;
         gmag_short_[short_write_index_] = gmag;
         roll_short_sum_ += roll;
         roll_short_sq_sum_ += (roll * roll);
@@ -389,29 +453,11 @@ void Monitor::PushSample(float roll, float pitch, float gmag, float tkeo) noexce
         short_write_index_ = (short_write_index_ + 1U) % kShortBufferSamples;
 
         if (state_ == NodeState::IDLE) {
-            roll_history_[write_index_] = roll;
-            pitch_history_[write_index_] = pitch;
-            gmag_history_[write_index_] = gmag;
-            write_index_ = (write_index_ + 1U) % kStorageSamples;
-            if (sample_count_ < kStorageSamples) {
-                ++sample_count_;
-            }
+            append_history(roll, pitch, gx, gy, gz, ax, ay, az, gmag);
 
             if ((old_detector_state == NodeState::IDLE) && (new_detector_state == NodeState::DISTURBED)) {
                 state_ = NodeState::DISTURBED;
-
-                write_index_ = 0U;
-                sample_count_ = 0U;
-
-                const std::size_t count = short_sample_count_;
-                for (std::size_t i = 0U; i < count; ++i) {
-                    const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
-                    roll_history_[i] = roll_short_[idx];
-                    pitch_history_[i] = pitch_short_[idx];
-                    gmag_history_[i] = gmag_short_[idx];
-                }
-                write_index_ = count;
-                sample_count_ = count;
+                reset_from_short();
 
                 disturbed_exit_debounce_counter_ = 0U;
 
@@ -419,13 +465,7 @@ void Monitor::PushSample(float roll, float pitch, float gmag, float tkeo) noexce
                          static_cast<double>(gmag), static_cast<double>(tkeo));
             }
         } else if (state_ == NodeState::DISTURBED) {
-            roll_history_[write_index_] = roll;
-            pitch_history_[write_index_] = pitch;
-            gmag_history_[write_index_] = gmag;
-            write_index_ = (write_index_ + 1U) % kStorageSamples;
-            if (sample_count_ < kStorageSamples) {
-                ++sample_count_;
-            }
+            append_history(roll, pitch, gx, gy, gz, ax, ay, az, gmag);
 
             bool transitioned = false;
             disturbed_exit_debounce_counter_ = dsp_detector_.QuietCount();
@@ -441,31 +481,39 @@ void Monitor::PushSample(float roll, float pitch, float gmag, float tkeo) noexce
                 is_exit = true;
             }
 
-            if (!transitioned && sample_count_ >= (kStorageSamples - static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD))) {
+            if (!transitioned && sample_count_ >= (kEventSamples - static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD))) {
                 ESP_LOGI(kTag, "DISTURBED Buffer Refreshed");
-
-                write_index_ = 0U;
-                sample_count_ = 0U;
-
-                const std::size_t count = short_sample_count_;
-                for (std::size_t i = 0U; i < count; ++i) {
-                    const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
-                    roll_history_[i] = roll_short_[idx];
-                    pitch_history_[i] = pitch_short_[idx];
-                    gmag_history_[i] = gmag_short_[idx];
-                }
-                write_index_ = count;
-                sample_count_ = count;
 
                 should_compute = true;
                 pub_state = NodeState::DISTURBED;
                 is_exit = false;
+                should_reset_after_compute = true;
             }
         }
     } // mutex_ released here
 
     if (should_compute) {
         static_cast<void>(ComputeAndPublish(pub_state, is_exit));
+        if (should_reset_after_compute) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            write_index_ = 0U;
+            sample_count_ = 0U;
+            const std::size_t count = short_sample_count_;
+            for (std::size_t i = 0U; i < count; ++i) {
+                const std::size_t idx = (short_write_index_ + kShortBufferSamples - count + i) % kShortBufferSamples;
+                roll_history_[i] = roll_short_[idx];
+                pitch_history_[i] = pitch_short_[idx];
+                gx_history_[i] = gx_short_[idx];
+                gy_history_[i] = gy_short_[idx];
+                gz_history_[i] = gz_short_[idx];
+                ax_history_[i] = ax_short_[idx];
+                ay_history_[i] = ay_short_[idx];
+                az_history_[i] = az_short_[idx];
+                gmag_history_[i] = gmag_short_[idx];
+            }
+            write_index_ = count;
+            sample_count_ = count;
+        }
     }
 }
 
@@ -487,17 +535,13 @@ bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
 #if CONFIG_MONITOR_DEBUG_DUMP
             const std::int64_t modal_start_us = esp_timer_get_time();
 #endif
-            AnalyzeModalAxis(roll_history_, roll_modal_scratch_);
-            AnalyzeModalAxis(pitch_history_, pitch_modal_scratch_);
-
-            result.natural_freq_hz = ComputeGmagNaturalFrequency();
-            result.natural_freq_roll_hz = result.natural_freq_hz;
-            result.natural_freq_pitch_hz = result.natural_freq_hz;
-
-            result.roll_damping_ratio = ComputeDampingRegression(roll_modal_scratch_.pair_envelope,
-                                                                 result.natural_freq_hz);
-            result.pitch_damping_ratio = ComputeDampingRegression(pitch_modal_scratch_.pair_envelope,
-                                                                  result.natural_freq_hz);
+            const EventAnalysisResult event = AnalyzeImuEvent();
+            result.natural_freq_hz = event.natural_freq_hz;
+            result.natural_freq_roll_hz = event.natural_freq_hz;
+            result.natural_freq_pitch_hz = event.natural_freq_hz;
+            result.roll_damping_ratio = event.damping_ratio;
+            result.pitch_damping_ratio = event.damping_ratio;
+            result.damping_confidence = event.damping_confidence;
 
 #if CONFIG_MONITOR_DEBUG_DUMP
             const std::int64_t modal_elapsed_us = esp_timer_get_time() - modal_start_us;
@@ -516,6 +560,7 @@ bool Monitor::ComputeAndPublish(NodeState pub_state, bool is_exit) noexcept {
             result.natural_freq_hz = 0.0f;
             result.roll_damping_ratio = 0.0f;
             result.pitch_damping_ratio = 0.0f;
+            SetConfidence(result.damping_confidence, "low");
         }
     }
 
@@ -1383,6 +1428,354 @@ float Monitor::ComputeGmagNaturalFrequency() noexcept {
         return 0.0f;
     }
     return ComputeAxisNaturalFrequency(gmag_history_, StartIndex(), count);
+}
+
+void Monitor::SetConfidence(std::array<char, MonitorResult::kDampingConfidenceMax>& dst,
+                            const char* src) noexcept {
+    dst.fill('\0');
+    if (src == nullptr) {
+        src = "low";
+    }
+    std::strncpy(dst.data(), src, dst.size() - 1U);
+}
+
+Monitor::DecayOnsetResult Monitor::FindDecayOnsetTkeo() const noexcept {
+    DecayOnsetResult result{};
+    const std::size_t count = BufferSize();
+    if (count < 3U) {
+        return result;
+    }
+
+    constexpr float kBaselineGmagDps = 0.35f;
+    constexpr float kBurstQuantile = 0.30f;
+    constexpr float kSnapWindowS = 0.45f;
+    constexpr std::size_t kMinDecaySamples = 20U;
+    const float energy_floor = (10.0f * kBaselineGmagDps) * (10.0f * kBaselineGmagDps);
+
+    float psi_max = 0.0f;
+    for (std::size_t i = 1U; i + 1U < count; ++i) {
+        const float prev = gmag_history_[PhysicalIndex(i - 1U)];
+        const float curr = gmag_history_[PhysicalIndex(i)];
+        const float next = gmag_history_[PhysicalIndex(i + 1U)];
+        const float psi = (curr * curr) - (prev * next);
+        if (psi > psi_max) {
+            psi_max = psi;
+        }
+    }
+    if (psi_max < energy_floor) {
+        return result;
+    }
+
+    const float threshold = std::max(energy_floor, kBurstQuantile * psi_max);
+    std::size_t last_burst = 0U;
+    bool has_burst = false;
+    for (std::size_t i = count - 2U; i > 0U; --i) {
+        const float prev = gmag_history_[PhysicalIndex(i - 1U)];
+        const float curr = gmag_history_[PhysicalIndex(i)];
+        const float next = gmag_history_[PhysicalIndex(i + 1U)];
+        const float psi = std::max(0.0f, (curr * curr) - (prev * next));
+        if (psi > threshold) {
+            last_burst = i;
+            has_burst = true;
+            break;
+        }
+    }
+    if (!has_burst) {
+        return result;
+    }
+
+    const std::size_t snap_samples = std::max<std::size_t>(
+        1U,
+        static_cast<std::size_t>(std::round(kSnapWindowS * static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ))));
+    const std::size_t snap_start = (last_burst > snap_samples) ? (last_burst - snap_samples) : 0U;
+    const std::size_t snap_end = std::min(count - 1U, last_burst + snap_samples);
+    std::size_t best_idx = snap_start;
+    float best_dist = static_cast<float>(count);
+    float best_val = -1.0f;
+
+    for (std::size_t i = snap_start; i <= snap_end; ++i) {
+        const float curr = gmag_history_[PhysicalIndex(i)];
+        const bool local_max = (i > 0U) && ((i + 1U) < count) &&
+            curr > gmag_history_[PhysicalIndex(i - 1U)] &&
+            curr > gmag_history_[PhysicalIndex(i + 1U)];
+        if (local_max) {
+            const float dist = std::fabs(static_cast<float>(i) - static_cast<float>(last_burst));
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_idx = i;
+            }
+        } else if (best_dist >= static_cast<float>(count) && curr > best_val) {
+            best_val = curr;
+            best_idx = i;
+        }
+    }
+
+    result.onset = std::min(best_idx, count - 1U);
+    const std::size_t decay_len = count - result.onset;
+    if (decay_len < kMinDecaySamples) {
+        result.quality = DecayQuality::Low;
+        return result;
+    }
+
+    const std::size_t onset_end = std::min(count - 1U, result.onset + kMinDecaySamples);
+    float onset_max = 0.0f;
+    for (std::size_t i = result.onset; i <= onset_end; ++i) {
+        onset_max = std::max(onset_max, gmag_history_[PhysicalIndex(i)]);
+    }
+
+    const std::size_t tail_len = std::max(kMinDecaySamples, decay_len / 4U);
+    const std::size_t tail_start = (count > tail_len) ? (count - tail_len) : result.onset;
+    float tail_min = gmag_history_[PhysicalIndex(tail_start)];
+    for (std::size_t i = tail_start; i < count; ++i) {
+        tail_min = std::min(tail_min, gmag_history_[PhysicalIndex(i)]);
+    }
+
+    result.quality = ((tail_min < 1.0e-9f) || ((onset_max / tail_min) < 2.0f)) ?
+        DecayQuality::Low : DecayQuality::Reliable;
+    return result;
+}
+
+Monitor::SwayAxisResult Monitor::ComputeDominantAxisSway(std::size_t start, std::size_t end) const noexcept {
+    SwayAxisResult result{};
+    const std::size_t count = BufferSize();
+    if ((start >= count) || (end <= start) || (end > count)) {
+        return result;
+    }
+
+    const float dt = 1.0f / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    for (std::size_t i = start; i < end; ++i) {
+        const std::size_t idx = PhysicalIndex(i);
+        result.sx_deg += gx_history_[idx] * dt;
+        result.sy_deg += gy_history_[idx] * dt;
+        result.sz_deg += gz_history_[idx] * dt;
+    }
+
+    const float ax_abs = std::fabs(result.sx_deg);
+    const float ay_abs = std::fabs(result.sy_deg);
+    const float az_abs = std::fabs(result.sz_deg);
+    if (ax_abs >= ay_abs && ax_abs >= az_abs) {
+        result.dominant = DominantAxis::X;
+        result.valid = ax_abs > 0.0f;
+    } else if (ay_abs >= az_abs) {
+        result.dominant = DominantAxis::Y;
+        result.valid = ay_abs > 0.0f;
+    } else {
+        result.dominant = DominantAxis::Z;
+        result.valid = az_abs > 0.0f;
+    }
+    return result;
+}
+
+float Monitor::ComputeSignedAxisNaturalFrequency(DominantAxis axis,
+                                                 std::size_t start,
+                                                 std::size_t count) noexcept {
+    const std::size_t buffer_count = BufferSize();
+    if ((count < 4U) || (start >= buffer_count)) {
+        return 0.0f;
+    }
+    count = std::min(count, buffer_count - start);
+    if (count > kFftWindowSamples) {
+        start += count - kFftWindowSamples;
+        count = kFftWindowSamples;
+    }
+
+    const float sample_rate_hz = static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    const std::size_t fft_size = (count <= 512U) ? 512U : kFftWindowSamples;
+    const FftBinRange range = SelectFftBinRange(fft_size, sample_rate_hz);
+    if (!range.valid) {
+        return 0.0f;
+    }
+
+    std::fill(fft_input_.begin(), fft_input_.begin() + (fft_size * 2U), 0.0f);
+    float sum = 0.0f;
+    for (std::size_t i = 0U; i < count; ++i) {
+        const std::size_t idx = PhysicalIndex(start + i);
+        float val = gx_history_[idx];
+        if (axis == DominantAxis::Y) {
+            val = gy_history_[idx];
+        } else if (axis == DominantAxis::Z) {
+            val = gz_history_[idx];
+        }
+        fft_input_[2U * i] = val;
+        sum += val;
+    }
+
+    const float mean = sum / static_cast<float>(count);
+    for (std::size_t i = 0U; i < count; ++i) {
+        const float window = 0.5f - 0.5f *
+            std::cos(kTwoPi * static_cast<float>(i) / static_cast<float>(count - 1U));
+        fft_input_[2U * i] = (fft_input_[2U * i] - mean) * window;
+        fft_input_[2U * i + 1U] = 0.0f;
+    }
+
+    if (dsps_fft2r_fc32(fft_input_.data(), static_cast<int>(fft_size)) != ESP_OK) {
+        return 0.0f;
+    }
+    if (dsps_bit_rev_fc32(fft_input_.data(), static_cast<int>(fft_size)) != ESP_OK) {
+        return 0.0f;
+    }
+
+    float max_power = 0.0f;
+    std::size_t max_bin = 0U;
+    for (std::size_t bin = range.min_bin; bin <= range.max_bin; ++bin) {
+        const float real = fft_input_[2U * bin];
+        const float imag = fft_input_[2U * bin + 1U];
+        const float power = (real * real) + (imag * imag);
+        if (power > max_power) {
+            max_power = power;
+            max_bin = bin;
+        }
+    }
+
+    return (max_bin == 0U) ? 0.0f :
+        (static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(fft_size);
+}
+
+Monitor::DampingFitResult Monitor::ComputePeakHoldDamping(std::size_t start,
+                                                           std::size_t count,
+                                                           float natural_freq_hz,
+                                                           DecayQuality quality) noexcept {
+    DampingFitResult result{};
+    SetConfidence(result.confidence, "low");
+    if ((quality == DecayQuality::None) || (natural_freq_hz <= 0.0f) || (count < 10U)) {
+        return result;
+    }
+
+    constexpr float kBaselineGmagDps = 0.35f;
+    constexpr float kEnvelopeFcHz = 2.0f;
+    constexpr std::size_t kMinFitSamples = 10U;
+    constexpr float kMinFitCycles = 2.0f;
+    constexpr float kMinAmplitudeDrop = 2.0f;
+    constexpr float kHighConfMinSamplesPerCycle = 4.0f;
+
+    const float dt = 1.0f / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    const float alpha = std::exp(-kTwoPi * kEnvelopeFcHz * dt);
+    for (std::size_t i = 0U; i < count; ++i) {
+        const float val = std::max(0.0f, gmag_history_[PhysicalIndex(start + i)]);
+        residual_scratch_[i] = (i == 0U) ? val : std::max(val, alpha * residual_scratch_[i - 1U]);
+    }
+
+    const float period_samples = 1.0f / (natural_freq_hz * dt);
+    std::size_t skip = static_cast<std::size_t>(std::round(period_samples));
+    if (skip + kMinFitSamples > count) {
+        skip = 0U;
+    }
+
+    float peak_env = 0.0f;
+    for (std::size_t i = skip; i < count; ++i) {
+        peak_env = std::max(peak_env, residual_scratch_[i]);
+    }
+    const float lower_bound = std::max(std::max(4.0f * kBaselineGmagDps, 0.03f * peak_env), 1.0e-6f);
+
+    float env_max = 0.0f;
+    float env_min = 0.0f;
+    bool has_min = false;
+    std::size_t n = 0U;
+    float sum_t = 0.0f;
+    float sum_y = 0.0f;
+    float sum_ty = 0.0f;
+    float sum_t2 = 0.0f;
+    for (std::size_t i = skip; i < count; ++i) {
+        const float env = residual_scratch_[i];
+        if (env <= lower_bound) {
+            continue;
+        }
+        env_max = std::max(env_max, env);
+        env_min = has_min ? std::min(env_min, env) : env;
+        has_min = true;
+        const float t = static_cast<float>(i) * dt;
+        const float y = std::log(env);
+        sum_t += t;
+        sum_y += y;
+        sum_ty += t * y;
+        sum_t2 += t * t;
+        ++n;
+    }
+
+    if ((n < kMinFitSamples) || !has_min || (env_min < 1.0e-9f)) {
+        return result;
+    }
+    const float amp_drop = env_max / env_min;
+    const float fit_cycles = static_cast<float>(n) * dt * natural_freq_hz;
+    if ((amp_drop < kMinAmplitudeDrop) || (fit_cycles < kMinFitCycles)) {
+        return result;
+    }
+
+    const float nf = static_cast<float>(n);
+    const float denominator = (nf * sum_t2) - (sum_t * sum_t);
+    if (std::fabs(denominator) < 1.0e-15f) {
+        return result;
+    }
+    const float slope = ((nf * sum_ty) - (sum_t * sum_y)) / denominator;
+    if (slope > 0.0f) {
+        return result;
+    }
+
+    const float mean_y = sum_y / nf;
+    const float intercept = (sum_y - slope * sum_t) / nf;
+    float ss_res = 0.0f;
+    float ss_tot = 0.0f;
+    for (std::size_t i = skip; i < count; ++i) {
+        const float env = residual_scratch_[i];
+        if (env <= lower_bound) {
+            continue;
+        }
+        const float t = static_cast<float>(i) * dt;
+        const float y = std::log(env);
+        const float pred = intercept + slope * t;
+        ss_res += (y - pred) * (y - pred);
+        ss_tot += (y - mean_y) * (y - mean_y);
+    }
+    if (ss_tot < 1.0e-15f) {
+        return result;
+    }
+
+    const float r_squared = 1.0f - (ss_res / ss_tot);
+    result.damping_ratio = std::clamp(-slope / (kTwoPi * natural_freq_hz), 0.0f, 1.0f);
+    if ((r_squared > 0.90f) && (fit_cycles >= 3.0f) &&
+        (amp_drop >= kMinAmplitudeDrop) && (period_samples >= kHighConfMinSamplesPerCycle) &&
+        (quality == DecayQuality::Reliable)) {
+        SetConfidence(result.confidence, "high");
+    } else if ((r_squared > 0.70f) && (amp_drop >= kMinAmplitudeDrop)) {
+        SetConfidence(result.confidence, (quality == DecayQuality::Low) ? "medium" : "medium");
+    } else {
+        SetConfidence(result.confidence, "low");
+    }
+
+    return result;
+}
+
+Monitor::EventAnalysisResult Monitor::AnalyzeImuEvent() noexcept {
+    EventAnalysisResult result{};
+    SetConfidence(result.damping_confidence, "low");
+    const std::size_t count = BufferSize();
+    if (count < 4U) {
+        return result;
+    }
+
+    const DecayOnsetResult decay = FindDecayOnsetTkeo();
+    if (decay.quality == DecayQuality::None || decay.onset >= count) {
+        return result;
+    }
+
+    const SwayAxisResult sway = ComputeDominantAxisSway(0U, count);
+    if (!sway.valid) {
+        return result;
+    }
+
+    const std::size_t decay_count = count - decay.onset;
+    result.natural_freq_hz = ComputeSignedAxisNaturalFrequency(sway.dominant, decay.onset, decay_count);
+    if (result.natural_freq_hz <= 0.0f) {
+        return result;
+    }
+
+    const DampingFitResult damping = ComputePeakHoldDamping(decay.onset,
+                                                            decay_count,
+                                                            result.natural_freq_hz,
+                                                            decay.quality);
+    result.damping_ratio = damping.damping_ratio;
+    result.damping_confidence = damping.confidence;
+    return result;
 }
 
 void Monitor::GetFftData(float* out_psd, std::size_t& out_len) const noexcept {

@@ -113,7 +113,7 @@ bool FormatParameterCsv(const monitor::MonitorResult& result,
 
     const int len = std::snprintf(line.buffer.data(),
                                   line.buffer.size(),
-                                  "%lld,%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.3f,%.3f,%.3f,%s,%u\n",
+                                  "%lld,%llu,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%.4f,%.4f,%.3f,%.3f,%.3f,%s,%s,%u\n",
                                   static_cast<long long>(unix_time),
                                   static_cast<unsigned long long>(time_info.timestamp_us),
                                   result.roll_mean,
@@ -129,6 +129,7 @@ bool FormatParameterCsv(const monitor::MonitorResult& result,
                                   result.natural_freq_hz,
                                   result.natural_freq_roll_hz,
                                   result.natural_freq_pitch_hz,
+                                  result.damping_confidence.data(),
                                   state_str,
                                   static_cast<unsigned>(result.sample_count));
     if (len <= 0 || static_cast<std::size_t>(len) >= line.buffer.size()) {
@@ -158,7 +159,7 @@ bool FormatParameterJson(const monitor::MonitorResult& result,
                                   "\"pitch_sway_pp_max\":%.3f,\"pitch_sway_pp_mean\":%.3f,"
                                   "\"roll_damping_ratio\":%.4f,\"pitch_damping_ratio\":%.4f,"
                                   "\"natural_freq_hz\":%.3f,\"natural_freq_roll_hz\":%.3f,"
-                                  "\"natural_freq_pitch_hz\":%.3f,\"state\":\"%s\","
+                                  "\"natural_freq_pitch_hz\":%.3f,\"damping_confidence\":\"%s\",\"state\":\"%s\","
                                   "\"sample_count\":%u}\n",
                                   static_cast<long long>(unix_time),
                                   static_cast<unsigned long long>(time_info.timestamp_us),
@@ -175,6 +176,7 @@ bool FormatParameterJson(const monitor::MonitorResult& result,
                                   result.natural_freq_hz,
                                   result.natural_freq_roll_hz,
                                   result.natural_freq_pitch_hz,
+                                  result.damping_confidence.data(),
                                   state_str,
                                   static_cast<unsigned>(result.sample_count));
     if (len <= 0 || static_cast<std::size_t>(len) >= line.buffer.size()) {

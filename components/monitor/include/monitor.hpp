@@ -12,7 +12,6 @@
 #include "lsm6ds3.hpp"
 #include "adaptive_complementary_filter.hpp"
 #include "calibration.hpp"
-#include "chebyshev_hpf.hpp"
 #include "monitor_events.hpp"
 
 namespace monitor {
@@ -23,6 +22,7 @@ constexpr std::size_t kStorageSamples =
 
 constexpr std::size_t kFftWindowSamples = 1024U;
 constexpr std::size_t kFftOverlapSamples = kFftWindowSamples / 2U;
+constexpr std::size_t kEventSamples = 2048U;
 
 static_assert(kStorageSamples >= kFftWindowSamples,
               "Monitor storage window must be >= FFT window.");
@@ -32,6 +32,8 @@ static_assert(CONFIG_MONITOR_SHORT_BUFFER_SIZE <= 1024,
               "Monitor short buffer exceeds bounded RAM budget.");
 static_assert(CONFIG_MONITOR_N_DPAD < kStorageSamples,
               "DISTURBED refresh margin must be smaller than storage window.");
+static_assert(CONFIG_MONITOR_N_DPAD < kEventSamples,
+              "DISTURBED refresh margin must be smaller than event window.");
 
 struct StreamSample {
     float accel_x{0.0f};
@@ -70,6 +72,7 @@ enum class NodeState : std::uint8_t {
 };
 
 struct MonitorResult {
+    static constexpr std::size_t kDampingConfidenceMax = 8U;
     float roll_mean{0.0f};
     float roll_variance{0.0f};
     float pitch_mean{0.0f};
@@ -83,6 +86,7 @@ struct MonitorResult {
     float natural_freq_hz{0.0f};
     float natural_freq_roll_hz{0.0f};
     float natural_freq_pitch_hz{0.0f};
+    std::array<char, kDampingConfidenceMax> damping_confidence{'l', 'o', 'w', '\0'};
     NodeState state{NodeState::IDLE};
     std::uint32_t sample_count{0};
     std::uint64_t timestamp_us{0};
@@ -151,7 +155,10 @@ public:
 private:
     [[nodiscard]] bool ReadImu(sensor::lsm6ds3::Value& gyro,
                                sensor::lsm6ds3::Value& accel) noexcept;
-    void PushSample(float roll, float pitch, float gmag, float tkeo) noexcept;
+    void PushSample(float roll, float pitch,
+                    float gx, float gy, float gz,
+                    float ax, float ay, float az,
+                    float gmag, float tkeo) noexcept;
     [[nodiscard]] bool ComputeAndPublish(NodeState pub_state, bool is_exit = true) noexcept;
     [[nodiscard]] bool ComputeStats(MonitorResult& result) const noexcept;
     [[nodiscard]] bool ComputeNaturalFrequency(MonitorResult& result) noexcept;
@@ -199,6 +206,36 @@ private:
         std::size_t max_bin{0U};
         bool valid{false};
     };
+    enum class DecayQuality : std::uint8_t {
+        None = 0U,
+        Low = 1U,
+        Reliable = 2U
+    };
+    enum class DominantAxis : std::uint8_t {
+        X = 0U,
+        Y = 1U,
+        Z = 2U
+    };
+    struct DecayOnsetResult {
+        std::size_t onset{0U};
+        DecayQuality quality{DecayQuality::None};
+    };
+    struct SwayAxisResult {
+        float sx_deg{0.0f};
+        float sy_deg{0.0f};
+        float sz_deg{0.0f};
+        DominantAxis dominant{DominantAxis::X};
+        bool valid{false};
+    };
+    struct DampingFitResult {
+        float damping_ratio{0.0f};
+        std::array<char, MonitorResult::kDampingConfidenceMax> confidence{'l', 'o', 'w', '\0'};
+    };
+    struct EventAnalysisResult {
+        float natural_freq_hz{0.0f};
+        float damping_ratio{0.0f};
+        std::array<char, MonitorResult::kDampingConfidenceMax> damping_confidence{'l', 'o', 'w', '\0'};
+    };
     struct ModalAxisResult {
         DecayRegion decay{};
         ExtremaList raw_extrema{};
@@ -221,6 +258,15 @@ private:
     [[nodiscard]] FftBinRange SelectFftBinRange(std::size_t fft_size, float sample_rate_hz) const noexcept;
     [[nodiscard]] float ComputeResidualNaturalFrequency(const float* residual, std::size_t count) noexcept;
     void AnalyzeModalAxis(const std::array<float, kStorageSamples>& data, ModalAxisResult& out) noexcept;
+    [[nodiscard]] DecayOnsetResult FindDecayOnsetTkeo() const noexcept;
+    [[nodiscard]] SwayAxisResult ComputeDominantAxisSway(std::size_t start, std::size_t end) const noexcept;
+    [[nodiscard]] float ComputeSignedAxisNaturalFrequency(DominantAxis axis, std::size_t start, std::size_t count) noexcept;
+    [[nodiscard]] DampingFitResult ComputePeakHoldDamping(std::size_t start, std::size_t count,
+                                                           float natural_freq_hz,
+                                                           DecayQuality quality) noexcept;
+    [[nodiscard]] EventAnalysisResult AnalyzeImuEvent() noexcept;
+    static void SetConfidence(std::array<char, MonitorResult::kDampingConfidenceMax>& dst,
+                              const char* src) noexcept;
 
 #if CONFIG_MONITOR_DEBUG_DUMP
     void DumpDebugToSD(const ModalAxisResult& roll_modal, const ModalAxisResult& pitch_modal,
@@ -248,6 +294,12 @@ private:
     std::array<float, kStorageSamples> roll_history_{};
     std::array<float, kStorageSamples> pitch_history_{};
     std::array<float, kStorageSamples> gmag_history_{};
+    std::array<float, kEventSamples> gx_history_{};
+    std::array<float, kEventSamples> gy_history_{};
+    std::array<float, kEventSamples> gz_history_{};
+    std::array<float, kEventSamples> ax_history_{};
+    std::array<float, kEventSamples> ay_history_{};
+    std::array<float, kEventSamples> az_history_{};
     std::size_t write_index_{0U};
     std::size_t sample_count_{0U};
 
@@ -255,6 +307,12 @@ private:
     std::array<float, kShortBufferSamples> roll_short_{};
     std::array<float, kShortBufferSamples> pitch_short_{};
     std::array<float, kShortBufferSamples> gmag_short_{};
+    std::array<float, kShortBufferSamples> gx_short_{};
+    std::array<float, kShortBufferSamples> gy_short_{};
+    std::array<float, kShortBufferSamples> gz_short_{};
+    std::array<float, kShortBufferSamples> ax_short_{};
+    std::array<float, kShortBufferSamples> ay_short_{};
+    std::array<float, kShortBufferSamples> az_short_{};
     std::size_t short_write_index_{0U};
     std::size_t short_sample_count_{0U};
 
@@ -262,9 +320,6 @@ private:
     float roll_short_sq_sum_{0.0f};
     float pitch_short_sum_{0.0f};
     float pitch_short_sq_sum_{0.0f};
-
-    ChebyshevHpf hpf_{};
-    float hpf_settle_counter_{0.0f};
 
     std::size_t disturbed_exit_debounce_counter_{0U};
     TkeoWindow tkeo_window_{};

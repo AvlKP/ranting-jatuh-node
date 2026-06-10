@@ -7,6 +7,7 @@
 #include <new>
 #include <span>
 
+#include "esp_heap_caps.h"
 #include "unity.h"
 
 #define private public
@@ -20,8 +21,8 @@
 namespace {
 
 monitor::Monitor& MakeMonitorForTest(const monitor::MonitorConfig& config) {
-    alignas(monitor::Monitor) static std::byte storage[sizeof(monitor::Monitor)];
     static monitor::Monitor* monitor = nullptr;
+    static void* storage = nullptr;
 
     sensor::Lsm6ds3::Config imu_cfg{};
     imu_cfg.read_cb = [](std::uint8_t, std::uint8_t*, std::size_t) { return false; };
@@ -29,6 +30,10 @@ monitor::Monitor& MakeMonitorForTest(const monitor::MonitorConfig& config) {
 
     if (monitor != nullptr) {
         monitor->~Monitor();
+    }
+    if (storage == nullptr) {
+        storage = heap_caps_malloc(sizeof(monitor::Monitor), MALLOC_CAP_8BIT);
+        TEST_ASSERT_NOT_NULL(storage);
     }
     monitor = new (storage) monitor::Monitor{imu_cfg, config};
     return *monitor;
@@ -247,14 +252,6 @@ TEST_CASE("monitor members do not include deprecated accel_err fields", "[monito
     TEST_ASSERT_TRUE(true);
 }
 
-TEST_CASE("hpf settle counter exists and starts at zero", "[monitor][fsm]") {
-    using monitor::MonitorConfig;
-
-    MonitorConfig config{};
-    monitor::Monitor& monitor = MakeMonitorForTest(config);
-    TEST_ASSERT_FLOAT_WITHIN(0.0f, 0.0f, monitor.hpf_settle_counter_);
-}
-
 TEST_CASE("tkeo startup is bounded until three samples", "[monitor][dsp]") {
     monitor::TkeoWindow window{};
     float tkeo = -1.0f;
@@ -320,6 +317,22 @@ TEST_CASE("dsp detector quiet debounce resets on renewed disturbance", "[monitor
     TEST_ASSERT_EQUAL_UINT(0U, detector.QuietCount());
 }
 
+TEST_CASE("dsp detector quiet debounce holds through tkeo hysteresis band", "[monitor][dsp]") {
+    monitor::MonitorConfig config{};
+    config.dsp_tkeo_high = 40.0f;
+    config.dsp_tkeo_low = 5.0f;
+    config.dsp_gmag_onset_dps = 2.0f;
+    config.dsp_gmag_quiet_dps = 1.5f;
+    config.dsp_quiet_debounce = 3U;
+
+    monitor::DspDisturbanceDetector detector{};
+    static_cast<void>(detector.Update(2.1f, 0.0f, config));
+    static_cast<void>(detector.Update(1.0f, 1.0f, config));
+    TEST_ASSERT_EQUAL_UINT(1U, detector.QuietCount());
+    static_cast<void>(detector.Update(1.0f, 10.0f, config));
+    TEST_ASSERT_EQUAL_UINT(1U, detector.QuietCount());
+}
+
 TEST_CASE("disturbance buffers stay within configured storage bounds", "[monitor][dsp]") {
     monitor::MonitorConfig config{};
     config.dsp_tkeo_high = 40.0f;
@@ -329,15 +342,35 @@ TEST_CASE("disturbance buffers stay within configured storage bounds", "[monitor
     config.dsp_quiet_debounce = 3U;
 
     monitor::Monitor& monitor = MakeMonitorForTest(config);
-    monitor.PushSample(0.0f, 0.0f, 3.0f, 0.0f);
+    monitor.PushSample(0.0f, 0.0f, 0.0f, 0.0f, 3.0f, 0.0f, 0.0f, 1.0f, 3.0f, 0.0f);
 
     const std::size_t pushes = monitor::kStorageSamples + static_cast<std::size_t>(CONFIG_MONITOR_N_DPAD) + 8U;
     for (std::size_t i = 0U; i < pushes; ++i) {
         const float sample = static_cast<float>(i & 0x0FU);
-        monitor.PushSample(sample, -sample, 3.0f, 10.0f);
+        monitor.PushSample(sample, -sample, sample, -sample, 3.0f, 0.0f, 0.0f, 1.0f, 3.0f, 10.0f);
         TEST_ASSERT_TRUE(monitor.sample_count_ <= monitor::kStorageSamples);
         TEST_ASSERT_TRUE(monitor.write_index_ < monitor::kStorageSamples);
     }
+}
+
+TEST_CASE("disturbance copies calibrated short-buffer axes into event storage", "[monitor][dsp]") {
+    monitor::MonitorConfig config{};
+    config.dsp_tkeo_high = 40.0f;
+    config.dsp_tkeo_low = 5.0f;
+    config.dsp_gmag_onset_dps = 2.0f;
+    config.dsp_gmag_quiet_dps = 1.5f;
+    config.dsp_quiet_debounce = 3U;
+
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+    monitor.PushSample(1.0f, -1.0f, 0.1f, 0.2f, 0.3f, 1.1f, 1.2f, 1.3f, 0.4f, 0.0f);
+    monitor.PushSample(2.0f, -2.0f, 2.1f, 2.2f, 2.3f, 2.4f, 2.5f, 2.6f, 3.8f, 0.0f);
+
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::NodeState::DISTURBED),
+                            static_cast<std::uint8_t>(monitor.state_));
+    TEST_ASSERT_TRUE(monitor.sample_count_ >= 2U);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.1f, monitor.gx_history_[0U]);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.2f, monitor.gy_history_[1U]);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.6f, monitor.az_history_[1U]);
 }
 
 TEST_CASE("raw_log_7 reduced replay enters disturbance after calibrated gyro spike", "[monitor][dsp][replay]") {

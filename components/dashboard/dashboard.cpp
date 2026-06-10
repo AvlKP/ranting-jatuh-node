@@ -385,6 +385,9 @@ const char* kIndexHtml = R"raw(<!DOCTYPE html>
             <div class="status-badge" id="damping-pitch-badge">
                 &zeta; Pitch: <span id="damping-pitch-val">-</span>
             </div>
+            <div class="status-badge" id="damping-confidence-badge">
+                Confidence: <span id="damping-confidence-val">low</span>
+            </div>
         </div>
     </header>
 
@@ -566,6 +569,7 @@ const char* kIndexHtml = R"raw(<!DOCTYPE html>
                 document.getElementById('freq-pitch-val').textContent = data.natural_freq_pitch_hz > 0 ? data.natural_freq_pitch_hz.toFixed(2) : '-';
                 document.getElementById('damping-roll-val').textContent = data.roll_damping_ratio > 0 ? data.roll_damping_ratio.toFixed(4) : '-';
                 document.getElementById('damping-pitch-val').textContent = data.pitch_damping_ratio > 0 ? data.pitch_damping_ratio.toFixed(4) : '-';
+                document.getElementById('damping-confidence-val').textContent = data.damping_confidence || 'low';
 
                 // Update Sensor Table
                 const streamBody = document.getElementById('stream-body');
@@ -788,18 +792,22 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
     float freq_pitch = 0.0f;
     float damp_roll = 0.0f;
     float damp_pitch = 0.0f;
+    char damping_confidence[monitor::MonitorResult::kDampingConfidenceMax]{};
     {
         std::lock_guard<std::mutex> lock(g_self->mutex_);
         freq_roll = g_self->latest_result_.natural_freq_roll_hz;
         freq_pitch = g_self->latest_result_.natural_freq_pitch_hz;
         damp_roll = g_self->latest_result_.roll_damping_ratio;
         damp_pitch = g_self->latest_result_.pitch_damping_ratio;
+        std::strncpy(damping_confidence,
+                     g_self->latest_result_.damping_confidence.data(),
+                     sizeof(damping_confidence) - 1U);
     }
 
     if (SendFormatted(req,
                       "\"wifi_connected\":%s,\"mqtt_connected\":%s,\"heap_free\":%lu,\"sample_rate\":%d,\"node_id\":\"%s\",\"node_state\":\"%s\","
                       "\"natural_freq_roll_hz\":%.3f,\"natural_freq_pitch_hz\":%.3f,"
-                      "\"roll_damping_ratio\":%.4f,\"pitch_damping_ratio\":%.4f,"
+                      "\"roll_damping_ratio\":%.4f,\"pitch_damping_ratio\":%.4f,\"damping_confidence\":\"%s\","
                       "\"monitor_result_drops\":%lu,\"monitor_failure_drops\":%lu,"
                       "\"logger_event_drops\":%lu,\"logger_parameter_drops\":%lu,\"logger_failure_drops\":%lu,",
                       wifi_connected ? "true" : "false",
@@ -812,6 +820,7 @@ esp_err_t Dashboard::StatusHandler(httpd_req_t* req) noexcept {
                       freq_pitch,
                       damp_roll,
                       damp_pitch,
+                      damping_confidence,
                       static_cast<unsigned long>(g_self->monitor_.DroppedResultEvents()),
                       static_cast<unsigned long>(g_self->monitor_.DroppedFailureEvents()),
                       static_cast<unsigned long>(g_self->logger_.DroppedEvents()),

@@ -16,7 +16,7 @@ static const char* kTag = "LOGGER_STORAGE";
 const char* ParameterHeader() {
     return "timestamp_unix,timestamp_us,roll_mean,pitch_mean,roll_var,pitch_var,"
            "roll_pp_max,roll_pp_mean,pitch_pp_max,pitch_pp_mean,roll_zeta,pitch_zeta,"
-           "natural_freq_hz,natural_freq_roll_hz,natural_freq_pitch_hz,state,sample_count\n";
+           "natural_freq_hz,natural_freq_roll_hz,natural_freq_pitch_hz,damping_confidence,state,sample_count\n";
 }
 
 const char* FailureHeader() {

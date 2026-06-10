@@ -34,7 +34,8 @@ Node publishes processed monitoring data upon state transitions or buffer refres
   "pitch_damping_ratio": 0.038,
   "natural_freq_hz": 4.15,
   "natural_freq_roll_hz": 4.15,
-  "natural_freq_pitch_hz": 3.85,
+  "natural_freq_pitch_hz": 4.15,
+  "damping_confidence": "medium",
   "state": "DISTURBED",
   "sample_count": 512
 }
@@ -52,11 +53,12 @@ Node publishes processed monitoring data upon state transitions or buffer refres
 | `roll_sway_pp_mean` | `float` | Mean peak-to-peak roll sway in degrees. |
 | `pitch_sway_pp_max` | `float` | Max peak-to-peak pitch sway in degrees. |
 | `pitch_sway_pp_mean` | `float` | Mean peak-to-peak pitch sway in degrees. |
-| `roll_damping_ratio` | `float` | Estimated damping ratio for roll. 0.0 for IDLE or intermediate DISTURBED refresh. |
-| `pitch_damping_ratio` | `float` | Estimated damping ratio for pitch. 0.0 for IDLE or intermediate DISTURBED refresh. |
-| `natural_freq_hz` | `float` | Estimated natural frequency in Hz (max of roll/pitch). |
-| `natural_freq_roll_hz` | `float` | Estimated natural frequency for roll in Hz. 0.0 for IDLE or intermediate DISTURBED refresh. |
-| `natural_freq_pitch_hz` | `float` | Estimated natural frequency for pitch in Hz. 0.0 for IDLE or intermediate DISTURBED refresh. |
+| `roll_damping_ratio` | `float` | Shared dominant-axis damping ratio mirrored into the legacy roll field. 0.0 for IDLE, low-quality events, or intermediate DISTURBED refresh. |
+| `pitch_damping_ratio` | `float` | Shared dominant-axis damping ratio mirrored into the legacy pitch field. 0.0 for IDLE, low-quality events, or intermediate DISTURBED refresh. |
+| `natural_freq_hz` | `float` | Dominant signed-gyro-axis natural frequency in Hz. |
+| `natural_freq_roll_hz` | `float` | Same dominant-axis natural frequency mirrored into the legacy roll field. 0.0 for IDLE, low-quality events, or intermediate DISTURBED refresh. |
+| `natural_freq_pitch_hz` | `float` | Same dominant-axis natural frequency mirrored into the legacy pitch field. 0.0 for IDLE, low-quality events, or intermediate DISTURBED refresh. |
+| `damping_confidence` | `string` | Envelope damping fit confidence: `"high"`, `"medium"`, or `"low"`. |
 | `state` | `string` | FSM state that produced this payload: `"IDLE"` or `"DISTURBED"`. |
 | `sample_count` | `uint32` | Number of samples in the calculation window. |
 

@@ -75,11 +75,43 @@ config MONITOR_MODAL_FREQ_MIN_HZ_X10
 
 config MONITOR_MODAL_FREQ_MAX_HZ_X10
     int "Modal FFT maximum frequency (Hz x10)"
-    default 250
+    default 120
     range 1 2000
     help
         Maximum FFT frequency in Hz (scaled by 10) eligible for modal
         natural-frequency selection.
+
+config MONITOR_DSP_TKEO_HIGH_X10
+    int "DSP TKEO high threshold (x10)"
+    default 400
+    range 1 100000
+    help
+        Streaming gyro-magnitude TKEO threshold for entering DISTURBED.
+        Default 400 means 40.0.
+
+config MONITOR_DSP_TKEO_LOW_X10
+    int "DSP TKEO low threshold (x10)"
+    default 50
+    range 0 100000
+    help
+        Streaming gyro-magnitude TKEO quiet threshold for DISTURBED exit.
+        Default 50 means 5.0.
+
+config MONITOR_DSP_GMAG_ONSET_X100
+    int "DSP gyro magnitude onset threshold (dps x100)"
+    default 200
+    range 0 100000
+    help
+        Calibrated gyro magnitude threshold for entering DISTURBED.
+        Default 200 means 2.0 dps.
+
+config MONITOR_DSP_GMAG_QUIET_X100
+    int "DSP gyro magnitude quiet threshold (dps x100)"
+    default 150
+    range 0 100000
+    help
+        Calibrated gyro magnitude threshold for quiet debounce.
+        Default 150 means 1.5 dps.
 
 config MONITOR_FREEFALL_THS
     int "Free-fall threshold (raw)"
@@ -156,22 +188,6 @@ config MONITOR_N_DPAD
     range 10 1000
     help
         Number of samples before the 5-min buffer is full at which the buffer will be refreshed during a prolonged DISTURBED state.
-
-config MONITOR_HPF_THRESHOLD_X1000
-    int "Chebyshev HPF disturbance threshold (g x1000)"
-    default 20
-    range 1 1000
-    help
-        HPF magnitude threshold for disturbance detection (scaled by 1000).
-        E.g., 20 means 0.020 g. Applied to root-mean-square of all three axes.
-
-config MONITOR_HPF_SETTLE_SAMPLES
-    int "Chebyshev HPF settle period (samples)"
-    default 500
-    range 0 5000
-    help
-        Number of samples to suppress disturbance detection at startup to
-        allow HPF transient to decay.
 
 config MONITOR_IMU_CALIBRATION
     bool "Enable IMU bias calibration"
