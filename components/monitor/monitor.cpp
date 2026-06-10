@@ -183,18 +183,6 @@ bool Monitor::Init() noexcept {
     }
 #endif
 
-#if CONFIG_MONITOR_TARE_ENABLE
-    taring_complete_ = false;
-#else
-    taring_complete_ = true;
-#endif
-    roll_offset_ = 0.0f;
-    pitch_offset_ = 0.0f;
-    roll_tare_sum_ = 0.0f;
-    pitch_tare_sum_ = 0.0f;
-    tare_samples_accumulated_ = 0U;
-    tare_settle_accumulated_ = 0U;
-
     return true;
 }
 
@@ -259,39 +247,7 @@ bool Monitor::Update(float dt_s) noexcept {
     float current_roll = filter_.roll();
     float current_pitch = filter_.pitch();
 
-#if CONFIG_MONITOR_TARE_ENABLE
-    if (taring_complete_) {
-        current_roll -= roll_offset_;
-        current_pitch -= pitch_offset_;
-    } else {
-        if (tare_settle_accumulated_ < static_cast<std::size_t>(CONFIG_MONITOR_TARE_SETTLE_SAMPLES)) {
-            ++tare_settle_accumulated_;
-        } else {
-            roll_tare_sum_ += current_roll;
-            pitch_tare_sum_ += current_pitch;
-            ++tare_samples_accumulated_;
-            if (tare_samples_accumulated_ >= static_cast<std::size_t>(CONFIG_MONITOR_TARE_SAMPLES)) {
-                roll_offset_ = roll_tare_sum_ / static_cast<float>(CONFIG_MONITOR_TARE_SAMPLES);
-                pitch_offset_ = pitch_tare_sum_ / static_cast<float>(CONFIG_MONITOR_TARE_SAMPLES);
-                taring_complete_ = true;
-                ESP_LOGI(kTag, "Taring complete: roll_offset=%.3f pitch_offset=%.3f over %d samples",
-                         roll_offset_, pitch_offset_, CONFIG_MONITOR_TARE_SAMPLES);
 
-                for (std::size_t i = 0U; i < write_index_; ++i) {
-                    roll_history_[i] -= roll_offset_;
-                    pitch_history_[i] -= pitch_offset_;
-                }
-                for (std::size_t i = 0U; i < stream_count_; ++i) {
-                    stream_samples_[i].roll -= roll_offset_;
-                    stream_samples_[i].pitch -= pitch_offset_;
-                }
-
-                current_roll -= roll_offset_;
-                current_pitch -= pitch_offset_;
-            }
-        }
-    }
-#endif
 
     PushSample(current_roll, current_pitch,
                calib_gx, calib_gy, calib_gz,
@@ -427,12 +383,6 @@ void Monitor::PushSample(float roll, float pitch,
         };
 
         if (short_sample_count_ == kShortBufferSamples) {
-            const float old_roll = roll_short_[short_write_index_];
-            const float old_pitch = pitch_short_[short_write_index_];
-            roll_short_sum_ -= old_roll;
-            roll_short_sq_sum_ -= (old_roll * old_roll);
-            pitch_short_sum_ -= old_pitch;
-            pitch_short_sq_sum_ -= (old_pitch * old_pitch);
         } else {
             ++short_sample_count_;
         }
@@ -446,10 +396,6 @@ void Monitor::PushSample(float roll, float pitch,
         ay_short_[short_write_index_] = ay;
         az_short_[short_write_index_] = az;
         gmag_short_[short_write_index_] = gmag;
-        roll_short_sum_ += roll;
-        roll_short_sq_sum_ += (roll * roll);
-        pitch_short_sum_ += pitch;
-        pitch_short_sq_sum_ += (pitch * pitch);
 
         short_write_index_ = (short_write_index_ + 1U) % kShortBufferSamples;
 

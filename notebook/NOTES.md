@@ -15,16 +15,20 @@ Production implementation runs on ESP32-S3 (FreeRTOS, C++, no heap after init). 
 - dt from actual timestamp deltas (not constant 1/26 Hz) — handles FreeRTOS jitter in raw logger output.
 - State carried between samples via `pitch_rad`/`roll_rad` return values — matches C++ implicit state.
 
-### 2. Taring Algorithm
-**Date:** 2026-06-07
-**Source:** `components/monitor/monitor.cpp:176-208`
-**Config:** `CONFIG_MONITOR_TARE_SETTLE_SAMPLES=500`, `CONFIG_MONITOR_TARE_SAMPLES=100`
+### 2. Taring Algorithm — DEPRECATED / REMOVED
+**Date:** 2026-06-07 (added) | 2026-06-11 (removed)
+**Source:** `components/monitor/monitor.cpp:176-208` (removed)
+**Config:** `CONFIG_MONITOR_TARE_SETTLE_SAMPLES=500`, `CONFIG_MONITOR_TARE_SAMPLES=100` (removed)
 **Decision:** Two-phase calibration.
 1. **Settle phase** (500 samples) — discard filter transient while IIR converges.
 2. **Tare phase** (100 samples) — accumulate filtered roll/pitch, compute mean as offset.
 3. Offset subtracted from all subsequent samples.
 - NOT online — computed from complete dataset after full filter pass.
 - ESP32 retroactively applies offset to history/stream buffers; notebook skips retroactive since dataset is processed in-order.
+
+**Removal rationale:** Detection pipeline (gmag + TKEO) and analysis pipeline (variance, sway pp, damping, natural frequency) are all offset-invariant. Taring only shifted `roll_mean` and `pitch_mean` from useful absolute branch angle to cosmetic zero.
+
+**Current state:** Taring infrastructure removed from monitor firmware. `MonitorResult.roll_mean` and `pitch_mean` now carry absolute branch angle.
 
 ### 3. Disturbance Detection FSM
 **Date:** 2026-06-07

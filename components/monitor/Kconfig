@@ -112,26 +112,6 @@ config MONITOR_FF_DUR
         Free-fall duration event. Duration = FF_DUR + 1 in ODR cycles.
         Each LSB extends duration by 1 ODR.
 
-config MONITOR_TARE_ENABLE
-    bool "Enable tilt taring at startup"
-    default y
-    help
-        Calculates and subtracts baseline tilt (roll/pitch) offset at startup.
-
-config MONITOR_TARE_SAMPLES
-    int "Tilt tare sample count"
-    default 100
-    range 10 1000
-    help
-        Number of initial samples to average for the baseline tare offset calculation.
-
-config MONITOR_TARE_SETTLE_SAMPLES
-    int "Tilt tare settling sample count"
-    default 500
-    range 0 5000
-    help
-        Number of initial samples to discard at startup to allow the Madgwick/Complementary filter to converge before taring.
-
 config MONITOR_FFT_DE_MEAN_ENABLE
     bool "Enable de-meaning/zero-centering of FFT input"
     default y
@@ -139,11 +119,11 @@ config MONITOR_FFT_DE_MEAN_ENABLE
         Removes the mean (DC component) from input tilt vector before performing FFT to avoid a 0Hz peak.
 
 config MONITOR_SHORT_BUFFER_SIZE
-    int "Short buffer size for variance"
+    int "Short buffer size for pre-disturbance history"
     default 256
     range 10 1024
     help
-        Size of the short buffer to compute live variance for IDLE/DISTURBED transitions.
+        Size of the short buffer for pre-disturbance history backfill on IDLE→DISTURBED transitions.
 
 config MONITOR_N_DPAD
     int "DISTURBED buffer refresh margin (samples)"

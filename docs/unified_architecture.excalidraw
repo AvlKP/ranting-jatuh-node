@@ -1,0 +1,677 @@
+{
+  "type": "excalidraw",
+  "version": 2,
+  "source": "https://excalidraw.com",
+  "elements": [
+    {
+      "id": "bg-hardware",
+      "type": "rectangle",
+      "x": 40, "y": 20, "width": 720, "height": 130,
+      "strokeColor": "#1e40af", "backgroundColor": "#dbeafe",
+      "strokeWidth": 2, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "hardware-label",
+      "type": "text",
+      "x": 60, "y": 22, "width": 200, "height": 25,
+      "text": "HARDWARE INPUT",
+      "fontSize": 14, "fontFamily": 1,
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "imu-box",
+      "type": "rectangle",
+      "x": 80, "y": 55, "width": 220, "height": 70,
+      "strokeColor": "#1e40af", "backgroundColor": "#bfdbfe",
+      "strokeWidth": 2, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "imu-text",
+      "type": "text",
+      "x": 90, "y": 60, "width": 200, "height": 60,
+      "text": "LSM6DS3TR IMU\n6-axis Accel + Gyro\nI2C 400kHz, ODR 26-208Hz",
+      "fontSize": 11, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "ae-box",
+      "type": "rectangle",
+      "x": 340, "y": 55, "width": 180, "height": 70,
+      "strokeColor": "#1e40af", "backgroundColor": "#bfdbfe",
+      "strokeWidth": 2, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "ae-text",
+      "type": "text",
+      "x": 350, "y": 60, "width": 160, "height": 60,
+      "text": "AE Frontend\nAcoustic Emission\nGPIO ISR / ADC",
+      "fontSize": 11, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "ff-box",
+      "type": "rectangle",
+      "x": 560, "y": 55, "width": 170, "height": 70,
+      "strokeColor": "#b91c1c", "backgroundColor": "#fecaca",
+      "strokeWidth": 2, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "ff-text",
+      "type": "text",
+      "x": 570, "y": 60, "width": 150, "height": 60,
+      "text": "Free-Fall\nLSM6DS3 Motion\nInterrupt",
+      "fontSize": 11, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "bg-signal",
+      "type": "rectangle",
+      "x": 40, "y": 180, "width": 340, "height": 280,
+      "strokeColor": "#166534", "backgroundColor": "#dcfce7",
+      "strokeWidth": 2, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "signal-label",
+      "type": "text",
+      "x": 60, "y": 182, "width": 300, "height": 25,
+      "text": "SIGNAL CONDITIONING",
+      "fontSize": 14, "fontFamily": 1,
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "calib-box",
+      "type": "rectangle",
+      "x": 80, "y": 215, "width": 260, "height": 45,
+      "strokeColor": "#166534", "backgroundColor": "#bbf7d0",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "calib-text",
+      "type": "text",
+      "x": 90, "y": 220, "width": 240, "height": 35,
+      "text": "Static Bias Calibration\nraw[n] - bias[axis]  .  NVS persistent",
+      "fontSize": 11, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "compf-box",
+      "type": "rectangle",
+      "x": 80, "y": 275, "width": 260, "height": 60,
+      "strokeColor": "#166534", "backgroundColor": "#bbf7d0",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "compf-text",
+      "type": "text",
+      "x": 90, "y": 278, "width": 240, "height": 55,
+      "text": "Adaptive Complementary Filter\ntheta = a*int(g) + (1-a)*atan2(a)\nalpha auto-tunes on |accel| near 1g",
+      "fontSize": 11, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "tare-box",
+      "type": "rectangle",
+      "x": 80, "y": 350, "width": 260, "height": 40,
+      "strokeColor": "#166534", "backgroundColor": "#bbf7d0",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "tare-text",
+      "type": "text",
+      "x": 90, "y": 358, "width": 240, "height": 25,
+      "text": "Tare Subtraction (settle-period offset)",
+      "fontSize": 11, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "gmag-box",
+      "type": "rectangle",
+      "x": 80, "y": 405, "width": 260, "height": 40,
+      "strokeColor": "#166534", "backgroundColor": "#bbf7d0",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "gmag-text",
+      "type": "text",
+      "x": 90, "y": 413, "width": 240, "height": 25,
+      "text": "Gyro Magnitude: |g| = sqrt(gx2+gy2+gz2)",
+      "fontSize": 11, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "bg-realtime",
+      "type": "rectangle",
+      "x": 420, "y": 180, "width": 340, "height": 280,
+      "strokeColor": "#c2410c", "backgroundColor": "#ffedd5",
+      "strokeWidth": 2, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "realtime-label",
+      "type": "text",
+      "x": 440, "y": 182, "width": 310, "height": 25,
+      "text": "PLANE 1: REAL-TIME DETECTION [O(1)/sample]",
+      "fontSize": 14, "fontFamily": 1,
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "tkeo-box",
+      "type": "rectangle",
+      "x": 460, "y": 215, "width": 260, "height": 50,
+      "strokeColor": "#c2410c", "backgroundColor": "#fed7aa",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "tkeo-text",
+      "type": "text",
+      "x": 470, "y": 218, "width": 240, "height": 45,
+      "text": "Teager-Kaiser Energy Operator\npsi[n] = x[n-1]^2 - x[n-2]*x[n]\n3-sample window, 1-sample latency",
+      "fontSize": 11, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "schmitt-box",
+      "type": "rectangle",
+      "x": 460, "y": 285, "width": 260, "height": 110,
+      "strokeColor": "#c2410c", "backgroundColor": "#fed7aa",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "schmitt-text",
+      "type": "text",
+      "x": 470, "y": 288, "width": 240, "height": 104,
+      "text": "Schmitt Trigger State Machine\n\n  IDLE --(psi>hi OR |g|>onset)--> DISTURBED\n  DISTURBED --(psi<lo AND |g|<quiet)--> IDLE\n\n  Hysteresis + debounced exit (N quiet)\n  Pause-on-boundary prevents chatter",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "buffer-box",
+      "type": "rectangle",
+      "x": 460, "y": 410, "width": 260, "height": 35,
+      "strokeColor": "#c2410c", "backgroundColor": "#fed7aa",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "buffer-text",
+      "type": "text",
+      "x": 470, "y": 416, "width": 240, "height": 25,
+      "text": "Disturbance Buffer (roll, pitch, gmag, gyro, accel)",
+      "fontSize": 11, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "bg-posthoc",
+      "type": "rectangle",
+      "x": 40, "y": 490, "width": 720, "height": 520,
+      "strokeColor": "#7e22ce", "backgroundColor": "#f3e8ff",
+      "strokeWidth": 2, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "posthoc-label",
+      "type": "text",
+      "x": 60, "y": 492, "width": 450, "height": 25,
+      "text": "PLANE 2: POST-HOC MODAL ANALYSIS [triggered on DISTURBED -> IDLE]",
+      "fontSize": 14, "fontFamily": 1,
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "classify-box",
+      "type": "rectangle",
+      "x": 80, "y": 525, "width": 230, "height": 70,
+      "strokeColor": "#0891b2", "backgroundColor": "#cffafe",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "classify-text",
+      "type": "text",
+      "x": 90, "y": 528, "width": 210, "height": 65,
+      "text": "[FROM PYTHON] Event Classification\n\npeak>=20 -> pull_release\n>=8 dur>80 -> oscillation\n<8 dur<80 -> flick\n<8 dur>=80 -> pull_hold",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "dynamic-box",
+      "type": "rectangle",
+      "x": 340, "y": 530, "width": 100, "height": 60,
+      "strokeColor": "#7e22ce", "backgroundColor": "#e9d5ff",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "dynamic-text",
+      "type": "text",
+      "x": 348, "y": 540, "width": 85, "height": 40,
+      "text": "is_dynamic?\nPR or Osc",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "active-box",
+      "type": "rectangle",
+      "x": 80, "y": 615, "width": 230, "height": 50,
+      "strokeColor": "#0891b2", "backgroundColor": "#cffafe",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "active-text",
+      "type": "text",
+      "x": 90, "y": 618, "width": 210, "height": 45,
+      "text": "[FROM PYTHON] Active Region Extraction\nRMS-based self-tuning\nthreshold = max(baseline+3, RMS/3)",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "sway-box",
+      "type": "rectangle",
+      "x": 340, "y": 615, "width": 230, "height": 50,
+      "strokeColor": "#dc2626", "backgroundColor": "#fee2e2",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "sway-text",
+      "type": "text",
+      "x": 350, "y": 618, "width": 210, "height": 45,
+      "text": "[FIXED] Dominant Axis Sway\ntheta = cumsum(gyro)*dt\nsway = max(theta) - min(theta)\n(was cumsum bug, now peak-to-peak)",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "decay-box",
+      "type": "rectangle",
+      "x": 80, "y": 685, "width": 230, "height": 60,
+      "strokeColor": "#7e22ce", "backgroundColor": "#e9d5ff",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "decay-text",
+      "type": "text",
+      "x": 90, "y": 688, "width": 210, "height": 55,
+      "text": "TKEO Energy-Burst Decay Onset\npsi_pos[n] = max(psi[n],0)\nthreshold = max(floor, q*max(psi))\nsnap to nearest local gmag peak",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "fft-box",
+      "type": "rectangle",
+      "x": 340, "y": 685, "width": 230, "height": 60,
+      "strokeColor": "#7e22ce", "backgroundColor": "#e9d5ff",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "fft-text",
+      "type": "text",
+      "x": 350, "y": 688, "width": 210, "height": 55,
+      "text": "Natural Frequency (FFT)\nSigned-axis Hann-windowed FFT\nDe-mean, band 0.5-25 Hz\nPad/truncate to 512 or 1024 bins",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "envelope-box",
+      "type": "rectangle",
+      "x": 80, "y": 765, "width": 230, "height": 55,
+      "strokeColor": "#7e22ce", "backgroundColor": "#e9d5ff",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "envelope-text",
+      "type": "text",
+      "x": 90, "y": 768, "width": 210, "height": 50,
+      "text": "Peak-Hold Envelope\nenv[0] = |g|[0]\nenv[n] = max(|g|[n], a*env[n-1])\na = exp(-2*pi*fc*dt), fc=2Hz",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "damping-box",
+      "type": "rectangle",
+      "x": 340, "y": 765, "width": 230, "height": 80,
+      "strokeColor": "#7e22ce", "backgroundColor": "#e9d5ff",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "damping-text",
+      "type": "text",
+      "x": 350, "y": 768, "width": 210, "height": 75,
+      "text": "Bounded OLS Damping Ratio\nln(a_n) = ln(A0) - z*wn*t_n\nslope -> zeta = -m/(2*pi*fn)\nBounded: env > max(4*sigma, 0.03*peak)\nR2 > .90->high, > .70->med, else low",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "crossval-box",
+      "type": "rectangle",
+      "x": 80, "y": 840, "width": 490, "height": 55,
+      "strokeColor": "#0891b2", "backgroundColor": "#cffafe",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "crossval-text",
+      "type": "text",
+      "x": 90, "y": 843, "width": 470, "height": 50,
+      "text": "[FROM PYTHON] Frequency Cross-Validation\nCompute ZC freq (zero-crossing periods) and PK freq (peak-to-peak periods)\nWarn if |FFT - ZC|/FFT > 20%  ->  possible signal quality issue",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "params-box",
+      "type": "rectangle",
+      "x": 80, "y": 915, "width": 230, "height": 75,
+      "strokeColor": "#7e22ce", "backgroundColor": "#e9d5ff",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "params-text",
+      "type": "text",
+      "x": 90, "y": 918, "width": 210, "height": 70,
+      "text": "Auxiliary Parameters\nTilt: atan2(accel) values\nSway stats: max & mean p-p\nIDLE baseline: mean, variance",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "result-box",
+      "type": "rectangle",
+      "x": 340, "y": 915, "width": 230, "height": 75,
+      "strokeColor": "#a21caf", "backgroundColor": "#fae8ff",
+      "strokeWidth": 2, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "result-text",
+      "type": "text",
+      "x": 350, "y": 920, "width": 210, "height": 65,
+      "text": "Event Result\n{ fn, zeta, confidence,\n  sway, tilt, state,\n  event_type, fn_method }",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "bg-output",
+      "type": "rectangle",
+      "x": 40, "y": 1040, "width": 720, "height": 110,
+      "strokeColor": "#374151", "backgroundColor": "#f3f4f6",
+      "strokeWidth": 2, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "output-label",
+      "type": "text",
+      "x": 60, "y": 1042, "width": 200, "height": 25,
+      "text": "OUTPUT LAYER",
+      "fontSize": 14, "fontFamily": 1,
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "sd-box",
+      "type": "rectangle",
+      "x": 80, "y": 1075, "width": 180, "height": 50,
+      "strokeColor": "#374151", "backgroundColor": "#e5e7eb",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "sd-text",
+      "type": "text",
+      "x": 90, "y": 1080, "width": 160, "height": 40,
+      "text": "microSD Card\nFAT FS, 1-bit SDIO\nCSV log files",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "mqtt-box",
+      "type": "rectangle",
+      "x": 290, "y": 1075, "width": 200, "height": 50,
+      "strokeColor": "#374151", "backgroundColor": "#e5e7eb",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "mqtt-text",
+      "type": "text",
+      "x": 300, "y": 1080, "width": 180, "height": 40,
+      "text": "MQTT v5.0 Broker\nranting/{id}/parameters\nranting/{id}/failures",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "dash-box",
+      "type": "rectangle",
+      "x": 520, "y": 1075, "width": 180, "height": 50,
+      "strokeColor": "#374151", "backgroundColor": "#e5e7eb",
+      "strokeWidth": 1.5, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "dash-text",
+      "type": "text",
+      "x": 530, "y": 1080, "width": 160, "height": 40,
+      "text": "HTTP Dashboard\n/api/status\nJSON stream",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "legend-box",
+      "type": "rectangle",
+      "x": 40, "y": 1170, "width": 720, "height": 55,
+      "strokeColor": "#6b7280", "backgroundColor": "#f9fafb",
+      "strokeWidth": 1, "roundness": {"type": 3},
+      "fillStyle": "solid", "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "legend-text",
+      "type": "text",
+      "x": 60, "y": 1173, "width": 680, "height": 50,
+      "text": "Target: ESP32-S3FH4R2  .  ESP-IDF v5.5.4  .  C++17  .  FreeRTOS  .  MQTT v5  .  microSD CSV\nUnified architecture merges Python reference algorithms with C++ firmware, fixing dominant-axis bug and adding event classification + frequency cross-validation",
+      "fontSize": 9, "fontFamily": 1, "textAlign": "left",
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a1", "type": "line",
+      "x": 190, "y": 125, "width": 0, "height": 90,
+      "strokeColor": "#1e40af", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 90]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a2", "type": "line",
+      "x": 210, "y": 260, "width": 0, "height": 15,
+      "strokeColor": "#166534", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 15]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a3", "type": "line",
+      "x": 210, "y": 335, "width": 0, "height": 15,
+      "strokeColor": "#166534", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 15]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a4", "type": "line",
+      "x": 210, "y": 390, "width": 0, "height": 15,
+      "strokeColor": "#166534", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 15]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a5", "type": "line",
+      "x": 340, "y": 425, "width": 120, "height": 0,
+      "strokeColor": "#c2410c", "strokeWidth": 1.5,
+      "points": [[0, 0], [120, 0]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a6", "type": "line",
+      "x": 590, "y": 265, "width": 0, "height": 20,
+      "strokeColor": "#c2410c", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 20]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a7", "type": "line",
+      "x": 590, "y": 395, "width": 0, "height": 15,
+      "strokeColor": "#c2410c", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 15]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a8", "type": "line",
+      "x": 590, "y": 445, "width": 0, "height": 80,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [-395, 80]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a9", "type": "line",
+      "x": 310, "y": 562, "width": 30, "height": 0,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [30, 0]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a10", "type": "line",
+      "x": 405, "y": 595, "width": 0, "height": 20,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [-95, 20]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a11", "type": "line",
+      "x": 405, "y": 595, "width": 0, "height": 20,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [50, 20]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a12", "type": "line",
+      "x": 470, "y": 562, "width": 0, "height": 53,
+      "strokeColor": "#ef4444", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 53]],
+      "strokeStyle": "dashed", "opacity": 100
+    },
+    {
+      "id": "a13", "type": "line",
+      "x": 310, "y": 640, "width": 30, "height": 0,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [30, 0]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a14", "type": "line",
+      "x": 195, "y": 665, "width": 0, "height": 20,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 20]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a15", "type": "line",
+      "x": 455, "y": 665, "width": 0, "height": 20,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 20]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a16", "type": "line",
+      "x": 195, "y": 745, "width": 0, "height": 20,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 20]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a17", "type": "line",
+      "x": 455, "y": 745, "width": 0, "height": 20,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 20]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a18", "type": "line",
+      "x": 325, "y": 895, "width": 0, "height": 20,
+      "strokeColor": "#7e22ce", "strokeWidth": 1.5,
+      "points": [[0, 0], [0, 20]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a19", "type": "line",
+      "x": 455, "y": 990, "width": 0, "height": 50,
+      "strokeColor": "#a21caf", "strokeWidth": 2,
+      "points": [[0, 0], [-110, 50]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a20", "type": "line",
+      "x": 455, "y": 990, "width": 0, "height": 50,
+      "strokeColor": "#a21caf", "strokeWidth": 2,
+      "points": [[0, 0], [0, 50]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a21", "type": "line",
+      "x": 455, "y": 990, "width": 0, "height": 50,
+      "strokeColor": "#a21caf", "strokeWidth": 2,
+      "points": [[0, 0], [155, 50]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a22", "type": "line",
+      "x": 190, "y": 125, "width": 0, "height": 90,
+      "strokeColor": "#1e40af", "strokeWidth": 1.5,
+      "points": [[0, 0], [-40, 90]],
+      "strokeStyle": "solid", "opacity": 100
+    },
+    {
+      "id": "a23", "type": "line",
+      "x": 210, "y": 335, "width": 0, "height": 90,
+      "strokeColor": "#166534", "strokeWidth": 1,
+      "points": [[0, 0], [250, 90]],
+      "strokeStyle": "dashed", "opacity": 100
+    },
+    {
+      "id": "ae-fail-text",
+      "type": "text",
+      "x": 420, "y": 155, "width": 200, "height": 25,
+      "text": "FAILURE DETECTION (parallel)",
+      "fontSize": 10, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100, "strokeColor": "#b91c1c"
+    },
+    {
+      "id": "label-gyro",
+      "type": "text",
+      "x": 435, "y": 355, "width": 60, "height": 20,
+      "text": "gyro raw",
+      "fontSize": 9, "fontFamily": 1,
+      "strokeStyle": "solid", "opacity": 100, "strokeColor": "#166534"
+    },
+    {
+      "id": "label-skip",
+      "type": "text",
+      "x": 500, "y": 600, "width": 60, "height": 20,
+      "text": "skip (no)",
+      "fontSize": 9, "fontFamily": 1, "textAlign": "center",
+      "strokeStyle": "solid", "opacity": 100, "strokeColor": "#ef4444"
+    }
+  ],
+  "appState": {
+    "gridSize": 20,
+    "viewBackgroundColor": "#ffffff"
+  },
+  "files": {}
+}

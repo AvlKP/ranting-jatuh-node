@@ -57,8 +57,8 @@ struct StreamSample {
     float gyro_x{0.0f};         ///< Calibrated X-axis angular velocity [dps].
     float gyro_y{0.0f};         ///< Calibrated Y-axis angular velocity [dps].
     float gyro_z{0.0f};         ///< Calibrated Z-axis angular velocity [dps].
-    float roll{0.0f};           ///< Tared roll angle [deg].
-    float pitch{0.0f};          ///< Tared pitch angle [deg].
+    float roll{0.0f};           ///< Roll angle [deg].
+    float pitch{0.0f};          ///< Pitch angle [deg].
     std::uint64_t timestamp_us{0}; ///< Monotonic system time [us].
 };
 
@@ -405,25 +405,12 @@ private:
     std::size_t short_write_index_{0U};
     std::size_t short_sample_count_{0U};
 
-    float roll_short_sum_{0.0f};
-    float roll_short_sq_sum_{0.0f};
-    float pitch_short_sum_{0.0f};
-    float pitch_short_sq_sum_{0.0f};
-
     std::size_t disturbed_exit_debounce_counter_{0U};
     TkeoWindow tkeo_window_{};
     DspDisturbanceDetector dsp_detector_{};
 
 
     NodeState state_{NodeState::IDLE};
-
-    bool taring_complete_{false};
-    float roll_offset_{0.0f};
-    float pitch_offset_{0.0f};
-    float roll_tare_sum_{0.0f};
-    float pitch_tare_sum_{0.0f};
-    std::size_t tare_samples_accumulated_{0U};
-    std::size_t tare_settle_accumulated_{0U};
 
     std::array<float, kFftWindowSamples * 2U> fft_input_{};
     std::array<float, kFftWindowSamples / 2U> psd_accum_{};
