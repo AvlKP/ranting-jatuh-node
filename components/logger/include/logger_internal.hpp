@@ -41,6 +41,8 @@ void SetMountPoint(const char* mount_point) noexcept;
 } // namespace storage
 
 namespace mqtt {
+[[nodiscard]] bool InitCore() noexcept;
+[[nodiscard]] bool StartWifi() noexcept;
 [[nodiscard]] bool Init() noexcept;
 [[nodiscard]] bool SyncTimeOnce() noexcept;
 [[nodiscard]] bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept;

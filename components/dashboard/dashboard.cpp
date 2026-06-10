@@ -700,7 +700,12 @@ esp_err_t Dashboard::Start(const Config& config) noexcept {
 
     httpd_config_t server_config = HTTPD_DEFAULT_CONFIG();
     server_config.server_port = config_.port;
-    server_config.stack_size = 12288; // Ensure ample stack for directory browsing
+
+    constexpr std::uint16_t kHttpdStackSize = 8192U;
+    static_assert(kHttpdStackSize >= 4096U && kHttpdStackSize <= 16384U,
+                  "HTTPD stack size outside validated range.");
+
+    server_config.stack_size = kHttpdStackSize;
     server_config.lru_purge_enable = true;
 
     const esp_err_t err = httpd_start(&server_, &server_config);

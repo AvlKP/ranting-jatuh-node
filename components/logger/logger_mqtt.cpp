@@ -582,87 +582,6 @@ bool PublishRawInternal(const char* topic, const char* payload, const char* cont
     esp_mqtt_client_stop(s_client);
     return true;
 }
-#if CONFIG_DASHBOARD_ENABLE
-bool StartWifiPersistent() {
-    if (!InitWifiCore()) {
-        return false;
-    }
-
-    if (std::strlen(CONFIG_LOGGER_WIFI_SSID) == 0U) {
-        ESP_LOGE(kTag, "WiFi SSID not set");
-        g_mqtt_log_buffer.Log("WiFi: Error SSID not set");
-        return false;
-    }
-
-    wifi_config_t wifi_cfg{};
-    std::strncpy(reinterpret_cast<char*>(wifi_cfg.sta.ssid),
-                 CONFIG_LOGGER_WIFI_SSID,
-                 sizeof(wifi_cfg.sta.ssid));
-    wifi_cfg.sta.ssid[sizeof(wifi_cfg.sta.ssid) - 1U] = '\0';
-    
-#if CONFIG_LOGGER_WIFI_ENT_ENABLE
-    wifi_cfg.sta.password[0] = '\0';
-#else
-    std::strncpy(reinterpret_cast<char*>(wifi_cfg.sta.password),
-                 CONFIG_LOGGER_WIFI_PASSWORD,
-                 sizeof(wifi_cfg.sta.password));
-    wifi_cfg.sta.password[sizeof(wifi_cfg.sta.password) - 1U] = '\0';
-#endif
-
-    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) {
-        ESP_LOGE(kTag, "WiFi set mode failed");
-        g_mqtt_log_buffer.Log("WiFi: Error set mode failed");
-        return false;
-    }
-    if (esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg) != ESP_OK) {
-        ESP_LOGE(kTag, "WiFi set config failed");
-        g_mqtt_log_buffer.Log("WiFi: Error set config failed");
-        return false;
-    }
-
-#if CONFIG_LOGGER_WIFI_ENT_ENABLE
-    g_mqtt_log_buffer.Log("WiFi: Enterprise config starting...");
-    const char* identity = CONFIG_LOGGER_WIFI_ENT_IDENTITY;
-    const char* username = CONFIG_LOGGER_WIFI_ENT_USERNAME;
-    if (std::strlen(username) == 0U) {
-        username = identity;
-    }
-    if (std::strlen(identity) > 0U) {
-        ESP_ERROR_CHECK(esp_eap_client_set_identity(
-            (const unsigned char *)identity,
-            std::strlen(identity)));
-    }
-    if (std::strlen(username) > 0U) {
-        ESP_ERROR_CHECK(esp_eap_client_set_username(
-            (const unsigned char *)username,
-            std::strlen(username)));
-    }
-    if (std::strlen(CONFIG_LOGGER_WIFI_ENT_PASSWORD) > 0U) {
-        ESP_ERROR_CHECK(esp_eap_client_set_password(
-            (const unsigned char *)CONFIG_LOGGER_WIFI_ENT_PASSWORD,
-            std::strlen(CONFIG_LOGGER_WIFI_ENT_PASSWORD)));
-    }
-    ESP_ERROR_CHECK(esp_wifi_sta_enterprise_enable());
-    g_mqtt_log_buffer.Log("WiFi: Enterprise PEAP enabled");
-#endif
-
-    xEventGroupClearBits(s_wifi_event_group, kWifiConnectedBit | kWifiFailedBit);
-    s_last_disconnect_reason = 0U;
-    
-    char log_buf[64];
-    std::snprintf(log_buf, sizeof(log_buf), "WiFi: Connecting to SSID %s...", CONFIG_LOGGER_WIFI_SSID);
-    g_mqtt_log_buffer.Log(log_buf);
-    
-    if (esp_wifi_start() != ESP_OK) {
-        ESP_LOGE(kTag, "WiFi start failed");
-        g_mqtt_log_buffer.Log("WiFi: Error start failed");
-        return false;
-    }
-
-    return true;
-}
-#endif
-
 void GenerateNodeId(char* out_buf, std::size_t buf_size) {
     const std::uint32_t adj_idx = esp_random() % kAdjectiveCount;
     const std::uint32_t noun_idx = esp_random() % kNounCount;
@@ -736,6 +655,112 @@ const char* BuildTopic(const char* datatype) {
 
 } // namespace
 
+bool InitCore() noexcept {
+    if (!InitNvs()) {
+        return false;
+    }
+
+    if (!s_events_registered) {
+        if (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &WifiEventHandler, nullptr) != ESP_OK) {
+            ESP_LOGE(kTag, "WiFi event handler register failed");
+            return false;
+        }
+        if (esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &IpEventHandler, nullptr) != ESP_OK) {
+            ESP_LOGE(kTag, "IP event handler register failed");
+            return false;
+        }
+        s_events_registered = true;
+    }
+
+    if (s_wifi_event_group == nullptr) {
+        s_wifi_event_group = xEventGroupCreateStatic(&s_wifi_event_group_buffer);
+    }
+    if (s_mqtt_event_group == nullptr) {
+        s_mqtt_event_group = xEventGroupCreateStatic(&s_mqtt_event_group_buffer);
+    }
+
+    return s_wifi_event_group != nullptr && s_mqtt_event_group != nullptr;
+}
+
+bool StartWifi() noexcept {
+    if (!InitWifiCore()) {
+        return false;
+    }
+
+    if (std::strlen(CONFIG_LOGGER_WIFI_SSID) == 0U) {
+        ESP_LOGE(kTag, "WiFi SSID not set");
+        g_mqtt_log_buffer.Log("WiFi: Error SSID not set");
+        return false;
+    }
+
+    wifi_config_t wifi_cfg{};
+    std::strncpy(reinterpret_cast<char*>(wifi_cfg.sta.ssid),
+                 CONFIG_LOGGER_WIFI_SSID,
+                 sizeof(wifi_cfg.sta.ssid));
+    wifi_cfg.sta.ssid[sizeof(wifi_cfg.sta.ssid) - 1U] = '\0';
+
+#if CONFIG_LOGGER_WIFI_ENT_ENABLE
+    wifi_cfg.sta.password[0] = '\0';
+#else
+    std::strncpy(reinterpret_cast<char*>(wifi_cfg.sta.password),
+                 CONFIG_LOGGER_WIFI_PASSWORD,
+                 sizeof(wifi_cfg.sta.password));
+    wifi_cfg.sta.password[sizeof(wifi_cfg.sta.password) - 1U] = '\0';
+#endif
+
+    if (esp_wifi_set_mode(WIFI_MODE_STA) != ESP_OK) {
+        ESP_LOGE(kTag, "WiFi set mode failed");
+        g_mqtt_log_buffer.Log("WiFi: Error set mode failed");
+        return false;
+    }
+    if (esp_wifi_set_config(WIFI_IF_STA, &wifi_cfg) != ESP_OK) {
+        ESP_LOGE(kTag, "WiFi set config failed");
+        g_mqtt_log_buffer.Log("WiFi: Error set config failed");
+        return false;
+    }
+
+#if CONFIG_LOGGER_WIFI_ENT_ENABLE
+    g_mqtt_log_buffer.Log("WiFi: Enterprise config starting...");
+    const char* identity = CONFIG_LOGGER_WIFI_ENT_IDENTITY;
+    const char* username = CONFIG_LOGGER_WIFI_ENT_USERNAME;
+    if (std::strlen(username) == 0U) {
+        username = identity;
+    }
+    if (std::strlen(identity) > 0U) {
+        ESP_ERROR_CHECK(esp_eap_client_set_identity(
+            (const unsigned char *)identity,
+            std::strlen(identity)));
+    }
+    if (std::strlen(username) > 0U) {
+        ESP_ERROR_CHECK(esp_eap_client_set_username(
+            (const unsigned char *)username,
+            std::strlen(username)));
+    }
+    if (std::strlen(CONFIG_LOGGER_WIFI_ENT_PASSWORD) > 0U) {
+        ESP_ERROR_CHECK(esp_eap_client_set_password(
+            (const unsigned char *)CONFIG_LOGGER_WIFI_ENT_PASSWORD,
+            std::strlen(CONFIG_LOGGER_WIFI_ENT_PASSWORD)));
+    }
+    ESP_ERROR_CHECK(esp_wifi_sta_enterprise_enable());
+    g_mqtt_log_buffer.Log("WiFi: Enterprise PEAP enabled");
+#endif
+
+    xEventGroupClearBits(s_wifi_event_group, kWifiConnectedBit | kWifiFailedBit);
+    s_last_disconnect_reason = 0U;
+
+    char log_buf[64];
+    std::snprintf(log_buf, sizeof(log_buf), "WiFi: Connecting to SSID %s...", CONFIG_LOGGER_WIFI_SSID);
+    g_mqtt_log_buffer.Log(log_buf);
+
+    if (esp_wifi_start() != ESP_OK) {
+        ESP_LOGE(kTag, "WiFi start failed");
+        g_mqtt_log_buffer.Log("WiFi: Error start failed");
+        return false;
+    }
+
+    return true;
+}
+
 bool SyncTimeOnce() noexcept {
     if (!ConnectWifi()) {
         return false;
@@ -749,11 +774,7 @@ bool SyncTimeOnce() noexcept {
 }
 
 bool Init() noexcept {
-#if CONFIG_DASHBOARD_ENABLE
-    return StartWifiPersistent();
-#else
-    return InitWifiCore();
-#endif
+    return InitCore() && StartWifi();
 }
 
 bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept {
