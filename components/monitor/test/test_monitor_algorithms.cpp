@@ -12,7 +12,6 @@
 
 #define private public
 #include "adaptive_complementary_filter.hpp"
-#include "chebyshev_hpf.hpp"
 #include "calibration.hpp"
 #include "complementary_filter.hpp"
 #include "monitor.hpp"
@@ -109,51 +108,7 @@ TEST_CASE("adaptive filter angles remain continuous", "[monitor][adaptive]") {
 }
 
 /* --------------------------------------------------------------------------
-   6.2 Chebyshev HPF Biquad Tests
-   -------------------------------------------------------------------------- */
-
-TEST_CASE("chebyshev hpf rejects DC constant input", "[monitor][hpf]") {
-    monitor::ChebyshevHpf hpf;
-
-    for (int i = 0; i < 600; ++i) {
-        hpf.update(1.0f, 0.0f, 0.0f);
-    }
-
-    float mag = hpf.magnitude();
-    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, mag);
-}
-
-TEST_CASE("chebyshev hpf passes high frequency content", "[monitor][hpf]") {
-    monitor::ChebyshevHpf hpf;
-
-    float max_mag = 0.0f;
-    for (int i = 0; i < 600; ++i) {
-        float t = static_cast<float>(i) / 26.0f;
-        float signal = std::sin(2.0f * 3.14159f * 1.0f * t);
-        hpf.update(signal, 0.0f, 0.0f);
-
-        if (i > 500) {
-            float mag = hpf.magnitude();
-            if (mag > max_mag) max_mag = mag;
-        }
-    }
-
-    TEST_ASSERT_TRUE(max_mag > 0.1f);
-}
-
-TEST_CASE("chebyshev hpf magnitude zero for zero input", "[monitor][hpf]") {
-    monitor::ChebyshevHpf hpf;
-
-    for (int i = 0; i < 600; ++i) {
-        hpf.update(0.0f, 0.0f, 0.0f);
-    }
-
-    float mag = hpf.magnitude();
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, mag);
-}
-
-/* --------------------------------------------------------------------------
-   6.3 Axis Convention Fix Tests
+   6.2 Axis Convention Fix Tests
    -------------------------------------------------------------------------- */
 
 TEST_CASE("complementary filter pitch uses atan2(ax, az)", "[monitor][axis]") {

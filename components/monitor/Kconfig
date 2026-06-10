@@ -49,22 +49,6 @@ config MONITOR_PEAK_MIN_SPACING_SAMPLES
     help
         Minimum sample spacing between peaks for sway and damping detection.
 
-config MONITOR_CENTERLINE_MIN_AMPLITUDE_X100
-    int "Centerline pair min amplitude (deg x100)"
-    default 5
-    range 1 9000
-    help
-        Minimum half peak-to-peak amplitude in degrees (scaled by 100) for
-        centerline modal analysis.
-
-config MONITOR_CENTERLINE_LOBE_REVERSAL_X100
-    int "Centerline lobe reversal threshold (deg x100)"
-    default 10
-    range 1 9000
-    help
-        Minimum opposite-extrema reversal in degrees (scaled by 100) before
-        lobe collapse starts a new peak/trough lobe.
-
 config MONITOR_MODAL_FREQ_MIN_HZ_X10
     int "Modal FFT minimum frequency (Hz x10)"
     default 5
@@ -161,33 +145,6 @@ config MONITOR_SHORT_BUFFER_SIZE
     help
         Size of the short buffer to compute live variance for IDLE/DISTURBED transitions.
 
-# @deprecated Legacy variance-based IDLE detection. No longer used by any code.
-# Replaced by CONFIG_MONITOR_DSP_TKEO_HIGH_X10 and DspDisturbanceDetector.
-config MONITOR_K_IDLE_X100
-    int "IDLE to DISTURBED variance threshold multiplier (x100)"
-    default 150
-    range 100 1000
-    help
-        Multiplier (scaled by 100) for IDLE variance. E.g., 150 means short variance must exceed 1.5x of the 5-min IDLE variance.
-
-# @deprecated Legacy variance-based DISTURBED detection. No longer used by any code.
-# Replaced by CONFIG_MONITOR_DSP_TKEO_LOW_X10 and DspDisturbanceDetector.
-config MONITOR_K_DISTURBED_X100
-    int "DISTURBED to IDLE variance threshold multiplier (x100)"
-    default 110
-    range 50 1000
-    help
-        Multiplier (scaled by 100) for IDLE variance. E.g., 110 means short variance must fall below 1.1x of the 5-min IDLE variance.
-
-# @deprecated Legacy absolute minimum variance floor. No longer used by any code.
-# Replaced by DspDisturbanceDetector which uses TKEO + gmag thresholds.
-config MONITOR_ABS_MIN_VAR_X10000
-    int "Absolute minimum variance floor (x10000)"
-    default 50
-    range 1 10000
-    help
-        Absolute minimum variance floor (scaled by 10000). E.g., 50 means absolute floor is 0.005 deg^2. Used to prevent false transitions on very still devices.
-
 config MONITOR_N_DPAD
     int "DISTURBED buffer refresh margin (samples)"
     default 100
@@ -209,14 +166,6 @@ config MONITOR_DISTURBED_EXIT_DEBOUNCE
     range 1 1000
     help
         Number of consecutive samples below the low threshold to transition to IDLE.
-
-config MONITOR_DEBUG_DUMP
-    bool "Enable debug data dump to SD card"
-    default n
-    help
-        When enabled, intermediate FFT/decay region/peak/damping data is dumped
-        to /sdcard/dbg_dump.csv on each DISTURBED->IDLE transition for offline
-        analysis with scripts/debug_analyze.py.
 
 endmenu
 

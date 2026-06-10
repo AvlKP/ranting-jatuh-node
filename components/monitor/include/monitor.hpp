@@ -72,8 +72,6 @@ struct MonitorConfig {
     int ae_adc_threshold{CONFIG_MONITOR_AE_ADC_THRESHOLD}; ///< Raw ADC threshold for AE detection.
     float peak_min_amplitude_deg{static_cast<float>(CONFIG_MONITOR_PEAK_MIN_AMPLITUDE_X10) / 10.0f}; ///< Minimum peak amplitude for sway detection [deg].
     std::size_t peak_min_spacing{static_cast<std::size_t>(CONFIG_MONITOR_PEAK_MIN_SPACING_SAMPLES)}; ///< Minimum sample spacing between peaks.
-    float centerline_min_amplitude_deg{static_cast<float>(CONFIG_MONITOR_CENTERLINE_MIN_AMPLITUDE_X100) / 100.0f}; ///< Minimum amplitude for centerline pairs [deg]. @deprecated Legacy centerline modal analysis.
-    float centerline_lobe_reversal_deg{static_cast<float>(CONFIG_MONITOR_CENTERLINE_LOBE_REVERSAL_X100) / 100.0f}; ///< Lobe reversal threshold [deg]. @deprecated Legacy centerline modal analysis.
     float modal_freq_min_hz{static_cast<float>(CONFIG_MONITOR_MODAL_FREQ_MIN_HZ_X10) / 10.0f}; ///< Minimum natural frequency for FFT band [Hz].
     float modal_freq_max_hz{static_cast<float>(CONFIG_MONITOR_MODAL_FREQ_MAX_HZ_X10) / 10.0f}; ///< Maximum natural frequency for FFT band [Hz].
     float dsp_tkeo_high{static_cast<float>(CONFIG_MONITOR_DSP_TKEO_HIGH_X10) / 10.0f};         ///< TKEO high threshold for DISTURBED entry.
@@ -264,59 +262,7 @@ private:
                     float gmag, float tkeo) noexcept;
     [[nodiscard]] bool ComputeAndPublish(NodeState pub_state, bool is_exit = true) noexcept;
     [[nodiscard]] bool ComputeStats(MonitorResult& result) const noexcept;
-    /// @deprecated Declaration only — never defined. Superseded by
-    /// ComputeSignedAxisNaturalFrequency() in AnalyzeImuEvent().
-    [[nodiscard]] bool ComputeNaturalFrequency(MonitorResult& result) noexcept;
-    /// @deprecated Superseded by ComputeSignedAxisNaturalFrequency().
-    /// Uses gyro axis histories instead of generic array + start index.
-    [[nodiscard]] float ComputeAxisNaturalFrequency(const std::array<float, kStorageSamples>& history, std::size_t start_phys_idx, std::size_t count) noexcept;
-    /// @deprecated Superseded by ComputeSignedAxisNaturalFrequency().
-    /// Computed frequency on gmag instead of signed gyro axis.
-    [[nodiscard]] float ComputeGmagNaturalFrequency() noexcept;
     [[nodiscard]] bool ComputeSwayAndDamping(MonitorResult& result) noexcept;
-    
-    /// @deprecated Superseded by DecayOnsetResult + DampingFitResult in
-    /// AnalyzeImuEvent(). Legacy type used by FindDecayRegion for peak-decline
-    /// envelope tracking.
-    struct DecayRegion {
-        std::size_t start_index{0U};
-        std::size_t count{0U};
-    };
-    struct PeakList {
-        static constexpr std::size_t kMaxPeaks = 256U;
-        std::array<float, kMaxPeaks> amplitudes{};
-        std::array<float, kMaxPeaks> times{};
-        std::size_t count{0U};
-    };
-    /// @deprecated Superseded by AnalyzeImuEvent(). Legacy types used by
-    /// AnalyzeModalAxis for centerline-based per-axis modal analysis.
-    /// @{
-    enum class ExtremaKind : std::uint8_t {
-        Peak = 0U,
-        Trough = 1U
-    };
-    struct ExtremaPoint {
-        std::size_t logical_index{0U};
-        float value{0.0f};
-        ExtremaKind kind{ExtremaKind::Peak};
-    };
-    struct ExtremaList {
-        static constexpr std::size_t kMaxExtrema = PeakList::kMaxPeaks;
-        std::array<ExtremaPoint, kMaxExtrema> points{};
-        std::size_t count{0U};
-    };
-    struct CenterlinePair {
-        std::size_t center_logical_index{0U};
-        float center_value{0.0f};
-        float amplitude{0.0f};
-        float time_s{0.0f};
-    };
-    struct CenterlinePairList {
-        static constexpr std::size_t kMaxPairs = PeakList::kMaxPeaks;
-        std::array<CenterlinePair, kMaxPairs> pairs{};
-        std::size_t count{0U};
-    };
-    /// @}
     /// @brief Frequency bin range for FFT peak selection.
     struct FftBinRange {
         std::size_t min_bin{0U};  ///< Lowest FFT bin to scan.
@@ -359,37 +305,8 @@ private:
         float damping_ratio{0.0f};      ///< Damping ratio from peak-hold envelope OLS [0, 1].
         std::array<char, MonitorResult::kDampingConfidenceMax> damping_confidence{'l', 'o', 'w', '\0'}; ///< Fit confidence.
     };
-    /// @deprecated Superseded by EventAnalysisResult in AnalyzeImuEvent().
-    /// Legacy result type holding per-axis modal analysis state from
-    /// AnalyzeModalAxis. Retained for CONFIG_MONITOR_DEBUG_DUMP only.
-    struct ModalAxisResult {
-        DecayRegion decay{};
-        ExtremaList raw_extrema{};
-        ExtremaList collapsed_extrema{};
-        CenterlinePairList centerline_pairs{};
-        PeakList pair_envelope{};
-        std::size_t residual_count{0U};
-        float natural_freq_hz{0.0f};
-        float damping_ratio{0.0f};
-    };
-    /// @deprecated Superseded by FindDecayOnsetTkeo() in AnalyzeImuEvent().
-    /// Uses global-max-peak decline tracking instead of TKEO energy-burst detection.
-    [[nodiscard]] DecayRegion FindDecayRegion(const std::array<float, kStorageSamples>& data, PeakList& out_peaks) const noexcept;
-    /// @deprecated Superseded by ComputePeakHoldDamping() in AnalyzeImuEvent().
-    /// Uses log-decrement on peak amplitudes; new method uses OLS log-fit on peak-hold envelope.
-    [[nodiscard]] float ComputeDampingRegression(const PeakList& peaks, float natural_freq_hz) const noexcept;
-    /// @deprecated Superseded by AnalyzeImuEvent() which uses TKEO decay onset
-    /// + signed-axis FFT. Centerline-based modal analysis is retained for
-    /// CONFIG_MONITOR_DEBUG_DUMP only.
-    [[nodiscard]] bool DetectRawExtrema(const std::array<float, kStorageSamples>& data, std::size_t start_logical,
-                                        std::size_t count, ExtremaList& out_extrema) const noexcept;
-    [[nodiscard]] bool CollapseExtremaLobes(const ExtremaList& raw_extrema, ExtremaList& out_extrema) const noexcept;
-    [[nodiscard]] bool BuildCenterlinePairs(const ExtremaList& extrema, CenterlinePairList& out_pairs) const noexcept;
-    [[nodiscard]] bool SubtractCenterline(const std::array<float, kStorageSamples>& data, std::size_t start_logical,
-                                          std::size_t count, const CenterlinePairList& pairs) noexcept;
-    [[nodiscard]] bool SelectPairEnvelope(const CenterlinePairList& pairs, PeakList& out_envelope) const noexcept;
-    [[nodiscard]] float ComputeResidualNaturalFrequency(const float* residual, std::size_t count) noexcept;
-    void AnalyzeModalAxis(const std::array<float, kStorageSamples>& data, ModalAxisResult& out) noexcept;
+
+
 
     /// @brief Find free-decay onset using TKEO energy-burst detection.
     /// Algorithm from imu_algorithms/_envelope.py::find_decay_onset_tkeo.
@@ -403,6 +320,11 @@ private:
     /// @param end End sample index (exclusive).
     /// @return SwayAxisResult with per-axis displacements and dominant axis.
     [[nodiscard]] SwayAxisResult ComputeDominantAxisSway(std::size_t start, std::size_t end) const noexcept;
+    /// @brief Compute valid FFT bin range from modal frequency band configuration.
+    /// @param fft_size FFT window size for bin calculation.
+    /// @param sample_rate_hz Sampling rate [Hz].
+    /// @return FftBinRange with valid bins or valid=false if range empty.
+    [[nodiscard]] FftBinRange SelectFftBinRange(std::size_t fft_size, float sample_rate_hz) const noexcept;
     /// @brief Estimate natural frequency via FFT on signed gyro axis decay region.
     /// Applies Hann window, de-means (optional), pads to 512 or 1024, runs ESP-DSP FFT,
     /// and finds peak bin within the configured frequency band.
@@ -441,13 +363,6 @@ private:
     /// @brief Copy a confidence string into a fixed-size char array.
     static void SetConfidence(std::array<char, MonitorResult::kDampingConfidenceMax>& dst,
                               const char* src) noexcept;
-
-#if CONFIG_MONITOR_DEBUG_DUMP
-    void DumpDebugToSD(const ModalAxisResult& roll_modal, const ModalAxisResult& pitch_modal,
-                       float freq_roll_hz, float freq_pitch_hz,
-                       float zeta_roll, float zeta_pitch,
-                       std::int64_t modal_elapsed_us) noexcept;
-#endif
 
     void CheckFailureEvents() noexcept;
     void PublishFailure(FailureEvent event) noexcept;
@@ -501,9 +416,6 @@ private:
 
 
     NodeState state_{NodeState::IDLE};
-    float idle_5min_roll_var_{0.0f};  ///< @deprecated Computed but never read. Superseded by DspDisturbanceDetector.
-    float idle_5min_pitch_var_{0.0f}; ///< @deprecated Computed but never read. Superseded by DspDisturbanceDetector.
-    bool has_baseline_variance_{false}; ///< @deprecated Set to true but never read. Superseded by DspDisturbanceDetector.
 
     bool taring_complete_{false};
     float roll_offset_{0.0f};
@@ -515,11 +427,7 @@ private:
 
     std::array<float, kFftWindowSamples * 2U> fft_input_{};
     std::array<float, kFftWindowSamples / 2U> psd_accum_{};
-    PeakList roll_peaks_{};              ///< @deprecated Never written or read. Legacy scratch for FindDecayRegion.
-    PeakList pitch_peaks_{};             ///< @deprecated Never written or read. Legacy scratch for FindDecayRegion.
     std::array<float, kStorageSamples> residual_scratch_{};
-    ModalAxisResult roll_modal_scratch_{};  ///< @deprecated Only read by CONFIG_MONITOR_DEBUG_DUMP. Never written by active code path.
-    ModalAxisResult pitch_modal_scratch_{}; ///< @deprecated Only read by CONFIG_MONITOR_DEBUG_DUMP. Never written by active code path.
     bool fft_initialized_{false};
 
     void* adc_handle_{nullptr};

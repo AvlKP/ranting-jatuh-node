@@ -3,19 +3,6 @@
 ## Purpose
 Notebook workflow for baseline-robust modal analysis of pull-and-release IMU logs.
 ## Requirements
-### Requirement: Centerline Modal Analysis
-The notebook analysis SHALL provide a centerline modal analysis mode that estimates and subtracts a moving baseline from disturbed roll and pitch signals before computing natural frequency. The centerline SHALL be computed from adjacent peak/trough pairs after raw local extrema are collapsed by lobe.
-
-#### Scenario: Baseline-robust residual
-- **WHEN** a disturbed segment contains collapsed alternating extrema
-- **THEN** the analysis SHALL compute a centerline from adjacent collapsed peak/trough pairs
-- **THEN** the analysis SHALL compute a residual signal as raw tilt minus interpolated centerline
-
-#### Scenario: Insufficient extrema
-- **WHEN** a disturbed segment has fewer than two valid collapsed alternating extrema
-- **THEN** the analysis SHALL return the raw signal mean as the centerline
-- **THEN** damping ratio SHALL be set to 0.0 for that axis
-
 ### Requirement: Bounded Natural Frequency Search
 The notebook analysis SHALL select natural frequency only from PSD bins within a configurable search band.
 
