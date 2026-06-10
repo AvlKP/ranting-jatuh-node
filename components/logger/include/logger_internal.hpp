@@ -33,6 +33,9 @@ struct TimeInfo {
 [[nodiscard]] bool FormatFailureCsv(const monitor::FailureResult& result,
                                     const TimeInfo& time_info,
                                     CsvLine& line) noexcept;
+[[nodiscard]] bool FormatFailureJson(const monitor::FailureResult& result,
+                                     const TimeInfo& time_info,
+                                     CsvLine& line) noexcept;
 
 namespace storage {
 void SetMountPoint(const char* mount_point) noexcept;
@@ -41,13 +44,6 @@ void SetMountPoint(const char* mount_point) noexcept;
 } // namespace storage
 
 namespace mqtt {
-[[nodiscard]] bool InitCore() noexcept;
-[[nodiscard]] bool StartWifi() noexcept;
-[[nodiscard]] bool Init() noexcept;
-[[nodiscard]] bool SyncTimeOnce() noexcept;
-[[nodiscard]] bool PublishParameters(const CsvLine* lines, std::size_t count) noexcept;
-[[nodiscard]] bool PublishFailure(const CsvLine& line) noexcept;
-[[nodiscard]] bool PublishRaw(const char* topic, const char* payload, const char* content_type) noexcept;
 [[nodiscard]] const char* GetNodeId() noexcept;
 [[nodiscard]] const char* GetTopic(const char* datatype) noexcept;
 } // namespace mqtt

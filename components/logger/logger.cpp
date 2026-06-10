@@ -1,5 +1,7 @@
 #include "logger.hpp"
 #include "logger_internal.hpp"
+#include "outbox.hpp"
+#include "network_task.hpp"
 
 #include <array>
 #include <cstdio>
@@ -15,42 +17,17 @@ namespace logger {
 
 namespace {
 
-constexpr std::size_t kPendingParamsMax = 32U;
 constexpr std::uint32_t kMinValidEpoch = 1672531200U;
-constexpr std::uint64_t kPublishPeriodUs =
-    static_cast<std::uint64_t>(CONFIG_LOGGER_WIFI_PERIOD_HOURS) * 60ULL * 1000000ULL;
-
 static const char* kTag = "LOGGER";
-constexpr std::size_t kTaskStackSize = 4096U;
+constexpr std::size_t kTaskStackSize = 6144U;
 static_assert(kTaskStackSize >= 2048U, "Logger task stack too small for ESP-IDF task minimum.");
-static_assert(kTaskStackSize <= 8192U, "Logger task stack exceeds bounded RAM budget.");
+static_assert(kTaskStackSize <= 16384U, "Logger task stack exceeds bounded RAM budget.");
 constexpr UBaseType_t kTaskPriority = 4U;
 constexpr BaseType_t kTaskCore = 0;
 
 void LoggerTaskEntry(void* arg) noexcept {
     auto* self = static_cast<Logger*>(arg);
     self->TaskLoop();
-}
-
-struct PendingParamsBuffer {
-    std::array<CsvLine, kPendingParamsMax> lines{};
-    std::size_t head{0U};
-    std::size_t count{0U};
-};
-
-PendingParamsBuffer g_pending_params{};
-std::array<CsvLine, kPendingParamsMax> g_publish_batch{};
-
-void AppendPendingParameter(const CsvLine& line) {
-    if (g_pending_params.count == kPendingParamsMax) {
-        g_pending_params.head = (g_pending_params.head + 1U) % kPendingParamsMax;
-        --g_pending_params.count;
-        ESP_LOGW(kTag, "Pending parameter buffer full, drop oldest");
-    }
-
-    const std::size_t tail = (g_pending_params.head + g_pending_params.count) % kPendingParamsMax;
-    g_pending_params.lines[tail] = line;
-    ++g_pending_params.count;
 }
 
 } // namespace
@@ -108,7 +85,7 @@ bool FormatParameterCsv(const monitor::MonitorResult& result,
                         const TimeInfo& time_info,
                         CsvLine& line) noexcept {
     const std::int64_t unix_time = time_info.valid ? time_info.unix_time : 0;
-    
+
     const char* state_str = "IDLE";
     if (result.state == monitor::NodeState::DISTURBED) {
         state_str = "DISTURBED";
@@ -147,7 +124,7 @@ bool FormatParameterJson(const monitor::MonitorResult& result,
                          const TimeInfo& time_info,
                          CsvLine& line) noexcept {
     const std::int64_t unix_time = time_info.valid ? time_info.unix_time : 0;
-    
+
     const char* state_str = "IDLE";
     if (result.state == monitor::NodeState::DISTURBED) {
         state_str = "DISTURBED";
@@ -209,6 +186,25 @@ bool FormatFailureCsv(const monitor::FailureResult& result,
     return true;
 }
 
+bool FormatFailureJson(const monitor::FailureResult& result,
+                       const TimeInfo& time_info,
+                       CsvLine& line) noexcept {
+    const std::int64_t unix_time = time_info.valid ? time_info.unix_time : 0;
+    const char* event_name = FailureEventName(result.event);
+    const int len = std::snprintf(line.buffer.data(),
+                                  line.buffer.size(),
+                                  "{\"unix_time\":%lld,\"timestamp_us\":%llu,\"event\":\"%s\"}\n",
+                                  static_cast<long long>(unix_time),
+                                  static_cast<unsigned long long>(time_info.timestamp_us),
+                                  event_name);
+    if (len <= 0 || static_cast<std::size_t>(len) >= line.buffer.size()) {
+        return false;
+    }
+
+    line.length = static_cast<std::uint16_t>(len);
+    return true;
+}
+
 bool Logger::Init(const Config& config) noexcept {
     if (config.sd_mount_point == nullptr || std::strlen(config.sd_mount_point) == 0U) {
         ESP_LOGE(kTag, "SD mount point not set");
@@ -218,9 +214,7 @@ bool Logger::Init(const Config& config) noexcept {
     sd_mount_point_ = config.sd_mount_point;
     storage::SetMountPoint(sd_mount_point_);
 
-    if (!mqtt::InitCore()) {
-        ESP_LOGE(kTag, "MQTT init failed");
-    }
+    // outbox and network task are initialized externally in main.cpp
 
     queue_handle_ = xQueueCreate(kQueueDepth, sizeof(Event));
     if (queue_handle_ == nullptr) {
@@ -248,8 +242,6 @@ bool Logger::Init(const Config& config) noexcept {
         return false;
     }
 
-    const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
-    next_publish_us_ = now_us + kPublishPeriodUs;
     return true;
 }
 
@@ -315,9 +307,9 @@ bool Logger::Start() noexcept {
 // ============================================================================
 // Logger Task Loop — runs on core 0, priority 4.
 // Blocks on queue receive (100ms tick), then:
-//   - Parameters: format CSV + JSON, write CSV to SD, queue JSON for MQTT batch
-//   - Failures: publish MQTT immediately, write CSV to SD
-// Batch publishes pending JSON parameters when queue is non-empty.
+//   - Parameters: format CSV + JSON, write CSV to SD, append JSON to outbox, notify network task
+//   - Failures: write CSV to SD first, then append JSON to outbox, notify network task
+// No direct MQTT or WiFi operations in this task.
 // ============================================================================
 void Logger::TaskLoop() noexcept {
     while (true) {
@@ -343,51 +335,50 @@ void Logger::TaskLoop() noexcept {
                              static_cast<int>(line_csv.length),
                              line_csv.buffer.data());
 #endif
-                AppendPendingParameter(line_json);
-            }
-        } else {
+                    if (!outbox::AppendParameter(line_json.buffer.data())) {
+                        ESP_LOGE(kTag, "Outbox parameter append failed");
+                    } else {
+                        network_task::EnqueueNotify();
+                    }
+                }
+            } else {
                 TimeInfo time_info{};
                 time_info.timestamp_us = event.failure.timestamp_us;
                 static_cast<void>(BuildTimeInfo(time_info));
 
-                CsvLine line{};
-                if (!FormatFailureCsv(event.failure, time_info, line)) {
-                    ESP_LOGE(kTag, "Format failure CSV failed");
+                CsvLine line_csv{};
+                CsvLine line_json{};
+                bool csv_ok = FormatFailureCsv(event.failure, time_info, line_csv);
+                bool json_ok = FormatFailureJson(event.failure, time_info, line_json);
+                if (!csv_ok || !json_ok) {
+                    ESP_LOGE(kTag, "Format failure CSV or JSON failed");
                 } else {
-                    if (!mqtt::PublishFailure(line)) {
-                        ESP_LOGE(kTag, "Failure MQTT publish failed");
-                    }
-                    if (!storage::AppendFailure(time_info, line)) {
+                    // SD write first, always
+                    if (!storage::AppendFailure(time_info, line_csv)) {
                         ESP_LOGE(kTag, "Failure storage write failed");
                     }
 #if CONFIG_LOGGER_SERIAL_OUTPUT
                     ESP_LOGI(kTag, "failure_csv=%.*s",
-                             static_cast<int>(line.length),
-                             line.buffer.data());
+                             static_cast<int>(line_csv.length),
+                             line_csv.buffer.data());
 #endif
+                    // Outbox write is best-effort, async
+                    if (!outbox::AppendFailure(line_json.buffer.data())) {
+                        ESP_LOGE(kTag, "Outbox failure append failed");
+                    } else {
+                        network_task::EnqueueNotify();
+                    }
                 }
-            }
-        }
-
-        // Event-driven publish instead of periodic timer
-        if (g_pending_params.count > 0U) {
-            for (std::size_t i = 0U; i < g_pending_params.count; ++i) {
-                const std::size_t idx = (g_pending_params.head + i) % kPendingParamsMax;
-                g_publish_batch[i] = g_pending_params.lines[idx];
-            }
-
-            if (mqtt::PublishParameters(g_publish_batch.data(), g_pending_params.count)) {
-                g_pending_params.head = 0U;
-                g_pending_params.count = 0U;
-            } else {
-                ESP_LOGE(kTag, "Parameter MQTT publish failed");
             }
         }
     }
 }
 
-bool Logger::VerifyMqttPublish(const char* topic, const char* payload) noexcept {
-    return mqtt::PublishRaw(topic, payload, "text/plain");
+bool Logger::VerifyMqttPublish(const char* /*topic*/, const char* /*payload*/) noexcept {
+    // MQTT publishing is now handled by network_task.
+    // Startup verification is implicit: network task publishes any pending outbox files on first connect.
+    network_task::EnqueueNotify();
+    return true;
 }
 
 bool Logger::HasMonitorResult() const noexcept {

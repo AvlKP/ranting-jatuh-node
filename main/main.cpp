@@ -42,6 +42,9 @@
 #include "calibration.hpp"
 #include "logger.hpp"
 #include "logger_internal.hpp"
+#include "outbox.hpp"
+#include "network_strategy.hpp"
+#include "network_task.hpp"
 #include "dashboard.hpp"
 #include "verify.hpp"
 
@@ -261,8 +264,18 @@ extern "C" void app_main(void) {
     logger::Logger::Config logger_cfg{};
     logger_cfg.sd_mount_point = CONFIG_APP_SD_MOUNT_POINT;
 
-    if (!logger::mqtt::InitCore()) {
-        ESP_LOGW(kAppTag, "InitCore failed");
+    if (!logger::outbox::Init(CONFIG_APP_SD_MOUNT_POINT)) {
+        ESP_LOGE(kAppTag, "Outbox init failed");
+        return;
+    }
+
+    if (!logger::network::Init()) {
+        ESP_LOGW(kAppTag, "Network strategy init failed, continuing");
+    }
+
+    if (!logger::network_task::Init(CONFIG_APP_SD_MOUNT_POINT)) {
+        ESP_LOGE(kAppTag, "Network task init failed");
+        return;
     }
 
     if (!logger.Init(logger_cfg)) {
@@ -271,6 +284,10 @@ extern "C" void app_main(void) {
     }
 
     bool all_critical_started = true;
+
+    if (!logger::network_task::Start()) {
+        ESP_LOGW(kAppTag, "Network task start failed, continuing boot");
+    }
 
     if (!logger.Start()) {
         all_critical_started = false;
@@ -281,19 +298,6 @@ extern "C" void app_main(void) {
     }
 
     LogHeapDiagnostics("post_tasks_pre_wifi");
-
-    if (!logger::mqtt::StartWifi()) {
-        ESP_LOGW(kAppTag, "StartWifi failed, continuing boot");
-    }
-
-    ESP_LOGI(kAppTag, "Synchronizing system time via NTP at startup...");
-    if (logger::mqtt::SyncTimeOnce()) {
-        ESP_LOGI(kAppTag, "Startup NTP time synchronization successful");
-    } else {
-        ESP_LOGW(kAppTag, "Startup NTP time synchronization failed or timed-out. Continuing boot.");
-    }
-
-    LogHeapDiagnostics("post_ntp");
 
 #if CONFIG_DASHBOARD_ENABLE
     {

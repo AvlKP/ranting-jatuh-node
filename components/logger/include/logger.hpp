@@ -83,7 +83,6 @@ private:
     std::uint32_t dropped_events_{0U};
     std::uint32_t dropped_parameters_{0U};
     std::uint32_t dropped_failures_{0U};
-    std::uint64_t next_publish_us_{0U};
     const char* sd_mount_point_{nullptr};
     bool has_monitor_result_{false};
 };
