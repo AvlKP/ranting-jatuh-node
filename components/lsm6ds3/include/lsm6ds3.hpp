@@ -1,3 +1,11 @@
+/// @file lsm6ds3.hpp
+/// @brief LSM6DS3TR 6-axis IMU driver via I2C.
+/// @details Provides register-level read/write, FIFO management, interrupt routing,
+/// motion detection (free-fall, tap, tilt, wake-up), pedometer, and temperature
+/// sensor access. Decouples I2C transport (callbacks) from register logic for
+/// testability. Operates at 400 kHz via ESP-IDF I2C master bus-device API.
+/// @ingroup lsm6ds3
+
 #pragma once
 
 #include <functional>
@@ -5,18 +13,22 @@
 
 namespace sensor {
 
-/// @brief Standalone driver class for the LSM6DS3 6-axis IMU
+/// @brief Standalone driver for the LSM6DS3TR 6-axis inertial measurement unit.
 class Lsm6ds3 {
 public:
+    /// @brief Callback: read from a sensor register via I2C.
     using ReadRegCb = std::function<bool(uint8_t reg, uint8_t* data, size_t len)>;
+    /// @brief Callback: write to a sensor register via I2C.
     using WriteRegCb = std::function<bool(uint8_t reg, const uint8_t* data, size_t len)>;
 
+    /// @brief Driver configuration binding sensor settings to I2C transport.
     struct Config {
-        lsm6ds3::Config imu_config;
-        ReadRegCb read_cb;
-        WriteRegCb write_cb;
+        lsm6ds3::Config imu_config; ///< ODR, full-scale, filter settings.
+        ReadRegCb read_cb;          ///< I2C read function.
+        WriteRegCb write_cb;        ///< I2C write function.
     };
 
+    /// @brief Interrupt 1 pin routing configuration.
     struct Int1Config {
         bool drdy_xl{false};
         bool drdy_g{false};
@@ -34,39 +46,40 @@ public:
     };
 
     struct Int2Config {
-        bool drdy_xl{false};
-        bool drdy_g{false};
-        bool drdy_temp{false};
-        bool fifo_full{false};
-        bool fifo_ovr{false};
-        bool fifo_th{false};
-        bool step_count_ov{false};
-        bool step_delta{false};
+        bool drdy_xl{false};        ///< Data-ready for accelerometer.
+        bool drdy_g{false};         ///< Data-ready for gyroscope.
+        bool drdy_temp{false};      ///< Data-ready for temperature sensor.
+        bool fifo_full{false};      ///< FIFO full.
+        bool fifo_ovr{false};       ///< FIFO overrun.
+        bool fifo_th{false};        ///< FIFO watermark threshold.
+        bool step_count_ov{false};  ///< Step counter overflow.
+        bool step_delta{false};     ///< Step delta event.
         
-        bool tilt{false};
-        bool wakeup{false};
-        bool free_fall{false};
-        bool single_tap{false};
-        bool double_tap{false};
-        bool six_d{false};
+        bool tilt{false};           ///< Tilt event.
+        bool wakeup{false};         ///< Wake-up event.
+        bool free_fall{false};      ///< Free-fall event.
+        bool single_tap{false};     ///< Single-tap event.
+        bool double_tap{false};     ///< Double-tap event.
+        bool six_d{false};          ///< 6D orientation event.
     };
 
+    /// @brief FIFO operation modes.
     enum class FifoMode : uint8_t {
-        Bypass = 0b000,
-        Fifo = 0b001,
-        ContinuousToFifo = 0b011,
-        BypassToContinuous = 0b100,
-        Continuous = 0b110
+        Bypass = 0b000,              ///< FIFO disabled, direct register access.
+        Fifo = 0b001,                ///< Collect data until FIFO full, then stop.
+        ContinuousToFifo = 0b011,    ///< Continuous mode, switch to FIFO on trigger.
+        BypassToContinuous = 0b100,  ///< Bypass mode, switch to continuous on trigger.
+        Continuous = 0b110           ///< Continuous FIFO (oldest data overwritten).
     };
 
-    /// @brief Holds the status of hardware-detected motion events
+    /// @brief Holds the status of hardware-detected motion events.
     struct MotionEvents {
-        bool single_tap{false};
-        bool double_tap{false};
-        bool wake_up{false};
-        bool free_fall{false};
-        bool step_detected{false};
-        bool tilt_detected{false};
+        bool single_tap{false};     ///< Single-tap detected.
+        bool double_tap{false};     ///< Double-tap detected.
+        bool wake_up{false};        ///< Wake-up event triggered.
+        bool free_fall{false};      ///< Free-fall condition detected.
+        bool step_detected{false};  ///< Step detected via pedometer.
+        bool tilt_detected{false};  ///< Tilt detected via embedded AWT engine.
     };
 
     explicit Lsm6ds3(const Config& config);

@@ -26,14 +26,22 @@ class DecayQuality(Enum):
 def envelope_peak_hold(gmag: np.ndarray, dt: float, fc: float = 2.0) -> np.ndarray:
     """Extract amplitude envelope via asymmetric peak-hold detector.
 
-    peak_hold[0] = gmag[0]
-    peak_hold[n] = max(gmag[n], alpha * peak_hold[n-1])
-    where alpha = exp(-2*pi * fc * dt)
+    peak_hold[0]    = gmag[0]
+    peak_hold[n]    = max(gmag[n], alpha * peak_hold[n-1])
+    where alpha     = exp(-2*pi * fc * dt)
 
-    The peak-hold rises instantly with the signal (no ringing at PR spikes)
-    and decays exponentially between peaks with time constant tau = 1/(2*pi*fc).
+    The peak-hold rises instantly with the signal and decays exponentially
+    between peaks with time constant tau = 1/(2*pi*fc).
 
     ESP32-feasible: O(N) single-pass, one multiply-add per sample.
+
+    Args:
+        gmag: Gyro magnitude array [dps].
+        dt: Sample period [s].
+        fc: Cutoff frequency for exponential decay [Hz] (default 2.0).
+
+    Returns:
+        Peak-hold envelope array (float32), same length as input.
     """
     gmag = np.atleast_1d(np.asarray(gmag, dtype=np.float64))
 
@@ -65,6 +73,12 @@ def _tkeo_pos(gmag: np.ndarray) -> np.ndarray:
     psi_pos[n] = max(psi[n], 0)
 
     Boundary: psi_pos[0] = psi_pos[-1] = 0.
+
+    Args:
+        gmag: Gyro magnitude array [dps].
+
+    Returns:
+        Non-negative TKEO energy array (float64), same length as input.
     """
     n = len(gmag)
     psi_pos = np.zeros(n, dtype=np.float64)
@@ -75,7 +89,16 @@ def _tkeo_pos(gmag: np.ndarray) -> np.ndarray:
 
 
 def _local_maxima_indices(signal: np.ndarray) -> np.ndarray:
-    """Return indices of local maxima in a 1-D signal."""
+    """Return indices of local maxima in a 1-D signal.
+
+    A local maximum is a sample strictly greater than both neighbors.
+
+    Args:
+        signal: 1-D numpy array.
+
+    Returns:
+        Array of indices where local maxima occur (int64).
+    """
     n = len(signal)
     if n < 3:
         return np.array([], dtype=np.int64)
@@ -102,16 +125,23 @@ def find_decay_onset_tkeo(
     Type-agnostic: works for PR, flick, oscillation without event_type.
 
     Algorithm:
-    1. Compute non-negative TKEO energy (psi_pos) over gmag segment.
-    2. energy_floor = (10 * baseline_gmag)^2 rejects pull-hold/static noise.
-    3. threshold = max(energy_floor, q * max(psi_pos)) selects last burst.
-    4. Find last index where psi_pos > threshold.
-    5. Snap to nearest local gmag maximum within snap_window_s.
-    6. Validate ringdown: min decay samples, 2x amplitude drop.
+      1. Compute non-negative TKEO energy (psi_pos) over gmag segment.
+      2. energy_floor = (10 * baseline_gmag)^2 rejects pull-hold/static noise.
+      3. threshold = max(energy_floor, q * max(psi_pos)) selects last burst.
+      4. Find last index where psi_pos > threshold.
+      5. Snap to nearest local gmag maximum within snap_window_s.
+      6. Validate ringdown: min decay samples, 2x amplitude drop.
+
+    Args:
+        gmag: Gyro magnitude array [dps].
+        dt: Sample period [s].
+        baseline_gmag: Baseline gyro magnitude for noise floor [dps] (default 0.35).
+        q: Burst quantile for threshold (default 0.30).
+        snap_window_s: Search window for nearest peak [s] (default 0.45).
+        min_decay_samples: Minimum samples in decay region (default 20).
 
     Returns:
-        (decay_onset, quality) where decay_onset is the sample index
-        of free-decay start and quality indicates region reliability.
+        Tuple of (decay_onset: sample index, quality: DecayQuality enum).
     """
     n = len(gmag)
     if n < 3:
@@ -192,18 +222,35 @@ def damping_from_envelope(
     """Estimate damping ratio zeta via OLS linear regression on log-envelope.
 
     Fits a line to ln(envelope) in the decay region:
-        ln(a(t)) = ln(A0) - zeta*omega_n*t
-        slope = -zeta*omega_n
+        ln(a(t)) = ln(A0) - zeta * omega_n * t
+        slope = -zeta * omega_n
         zeta = -slope / omega_n
 
     Uses single-pass accumulator for OLS (no matrix allocation, ESP32-friendly).
 
     When baseline_noise > 0 (bounded fit mode):
-        - Skips onset/filter transient samples.
-        - Computes a lower fit bound from noise and peak envelope.
-        - Fits only contiguous samples above the lower bound.
-        - Applies sample-count, cycle-count, amplitude-drop gates.
-        - Returns zeta=0.0 with "low" confidence if gates fail.
+      - Skips onset/filter transient samples.
+      - Computes a lower fit bound from noise and peak envelope.
+      - Fits only contiguous samples above the lower bound.
+      - Applies sample-count, cycle-count, amplitude-drop gates.
+      - Returns zeta=0.0 with "low" confidence if gates fail.
+
+    Args:
+        envelope: Peak-hold envelope array over decay region.
+        dt: Sample period [s].
+        fn: Natural frequency [Hz].
+        baseline_noise: Baseline gyro magnitude noise floor [dps].
+        skip_transient_cycles: Cycles to skip at onset (default 0).
+        lower_bound_override: Override the computed lower fit bound.
+        min_fit_samples: Minimum valid samples for fit (default 10).
+        min_fit_cycles: Minimum oscillation cycles for fit (default 2.0).
+        min_amplitude_drop: Minimum max/min amplitude ratio (default 2.0).
+        min_spc_for_high_conf: Minimum samples per cycle for high confidence (default 4.0).
+        return_diagnostics: If True, returns additional diagnostics dict.
+
+    Returns:
+        Tuple of (zeta: damping ratio [0, 1], confidence: "high"/"medium"/"low").
+        If return_diagnostics, returns (zeta, confidence, diagnostics_dict).
     """
     n = len(envelope)
     diag: Dict[str, Any] = {

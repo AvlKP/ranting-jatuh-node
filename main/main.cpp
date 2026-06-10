@@ -1,3 +1,19 @@
+/// @file main.cpp
+/// @brief Application entry point for the branch monitoring node.
+/// @details Boot sequence:
+/// 1. Create default ESP event loop
+/// 2. Initialize I2C bus (400kHz) for LSM6DS3TR IMU
+/// 3. Initialize and configure the IMU with calibration biases
+/// 4. Mount microSD card (SDMMC 1-bit or SDSPI)
+/// 5. Initialize MQTT core (WiFi + MQTT client)
+/// 6. Start Logger task (SD CSV + MQTT publishing)
+/// 7. Start Monitor task (IMU sampling + disturbance detection)
+/// 8. Sync NTP time
+/// 9. Optionally start HTTP dashboard
+/// 10. Run startup verification (IMU read, SD write, MQTT publish)
+/// 11. Delete app_main and let FreeRTOS tasks run
+/// @ingroup main
+
 #include <cstdint>
 #include <array>
 #include <cerrno>
@@ -14,6 +30,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_err.h"
 #include "esp_event.h"
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "esp_vfs_fat.h"
@@ -172,7 +189,16 @@ bool InitSdCard() {
     return true;
 }
 
-// (Helper definitions moved to verify.cpp)
+void LogHeapDiagnostics(const char* stage) {
+    const std::uint32_t free_internal = static_cast<std::uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    const std::uint32_t min_free = static_cast<std::uint32_t>(esp_get_minimum_free_heap_size());
+    const std::uint32_t largest_block = static_cast<std::uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+    ESP_LOGI(kAppTag, "heap %s free=%lu min_free=%lu largest_block=%lu",
+             stage,
+             static_cast<unsigned long>(free_internal),
+             static_cast<unsigned long>(min_free),
+             static_cast<unsigned long>(largest_block));
+}
 
 } // namespace
 
@@ -234,9 +260,30 @@ extern "C" void app_main(void) {
     static logger::Logger logger{};
     logger::Logger::Config logger_cfg{};
     logger_cfg.sd_mount_point = CONFIG_APP_SD_MOUNT_POINT;
+
+    if (!logger::mqtt::InitCore()) {
+        ESP_LOGW(kAppTag, "InitCore failed");
+    }
+
     if (!logger.Init(logger_cfg)) {
         ESP_LOGE(kAppTag, "Logger init failed");
         return;
+    }
+
+    bool all_critical_started = true;
+
+    if (!logger.Start()) {
+        all_critical_started = false;
+    }
+
+    if (!monitor.Start()) {
+        all_critical_started = false;
+    }
+
+    LogHeapDiagnostics("post_tasks_pre_wifi");
+
+    if (!logger::mqtt::StartWifi()) {
+        ESP_LOGW(kAppTag, "StartWifi failed, continuing boot");
     }
 
     ESP_LOGI(kAppTag, "Synchronizing system time via NTP at startup...");
@@ -246,19 +293,26 @@ extern "C" void app_main(void) {
         ESP_LOGW(kAppTag, "Startup NTP time synchronization failed or timed-out. Continuing boot.");
     }
 
+    LogHeapDiagnostics("post_ntp");
+
 #if CONFIG_DASHBOARD_ENABLE
-    static dashboard::Dashboard dashboard{monitor, logger};
-    dashboard::Dashboard::Config dash_cfg{};
-    dash_cfg.port = CONFIG_DASHBOARD_PORT;
-    dash_cfg.enabled = true;
-    if (dashboard.Start(dash_cfg) != ESP_OK) {
-        ESP_LOGE(kAppTag, "Dashboard start failed");
+    {
+        LogHeapDiagnostics("pre_dashboard");
+        static dashboard::Dashboard dashboard{monitor, logger};
+        dashboard::Dashboard::Config dash_cfg{};
+        dash_cfg.port = CONFIG_DASHBOARD_PORT;
+        dash_cfg.enabled = true;
+        const esp_err_t dash_err = dashboard.Start(dash_cfg);
+        if (dash_err != ESP_OK) {
+            ESP_LOGE(kAppTag, "Dashboard start failed");
+        }
+        LogHeapDiagnostics("post_dashboard");
     }
 #endif
 
 #if CONFIG_APP_VERIFY_ENABLE
     ESP_LOGI(kVerifyTag, "Verification start");
-    verify::LogRuntimeDiagnostics("startup", nullptr, nullptr);
+    verify::LogRuntimeDiagnostics("startup", monitor.GetTaskHandle(), logger.GetTaskHandle());
 
     sensor::lsm6ds3::Value gyro{};
     sensor::lsm6ds3::Value accel{};
@@ -273,19 +327,7 @@ extern "C" void app_main(void) {
 
     static_cast<void>(verify::VerifySdStorage());
     static_cast<void>(verify::VerifyMqtt(logger));
-#endif
 
-    if (!logger.Start()) {
-        ESP_LOGE(kAppTag, "Logger task start failed");
-        return;
-    }
-
-    if (!monitor.Start()) {
-        ESP_LOGE(kAppTag, "Monitor task start failed");
-        return;
-    }
-
-#if CONFIG_APP_VERIFY_ENABLE
     static_cast<void>(verify::VerifyMonitorOutput(logger));
     verify::LogRuntimeDiagnostics("post-verify", monitor.GetTaskHandle(), logger.GetTaskHandle());
     ESP_LOGI(kVerifyTag,
@@ -298,6 +340,10 @@ extern "C" void app_main(void) {
     ESP_LOGI(kVerifyTag, "Verification end");
 #endif
 
-    ESP_LOGI(kAppTag, "All tasks started, deleting app_main thread");
+    if (all_critical_started) {
+        ESP_LOGI(kAppTag, "All tasks started, deleting app_main thread");
+    } else {
+        ESP_LOGE(kAppTag, "Critical task start failed, deleting app_main thread");
+    }
     vTaskDelete(nullptr);
 }

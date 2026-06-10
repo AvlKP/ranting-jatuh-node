@@ -1,3 +1,10 @@
+/// @file mqtt_log.hpp
+/// @brief Thread-safe ring buffer for MQTT log messages.
+/// @details Stores up to 20 recent MQTT log lines of 96 chars each for
+/// dashboard display. Used to surface MQTT connect/disconnect/publish
+/// events in the debug UI without polling the serial console.
+/// @ingroup logger
+
 #pragma once
 
 #include <array>

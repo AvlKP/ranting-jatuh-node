@@ -161,6 +161,8 @@ config MONITOR_SHORT_BUFFER_SIZE
     help
         Size of the short buffer to compute live variance for IDLE/DISTURBED transitions.
 
+# @deprecated Legacy variance-based IDLE detection. No longer used by any code.
+# Replaced by CONFIG_MONITOR_DSP_TKEO_HIGH_X10 and DspDisturbanceDetector.
 config MONITOR_K_IDLE_X100
     int "IDLE to DISTURBED variance threshold multiplier (x100)"
     default 150
@@ -168,6 +170,8 @@ config MONITOR_K_IDLE_X100
     help
         Multiplier (scaled by 100) for IDLE variance. E.g., 150 means short variance must exceed 1.5x of the 5-min IDLE variance.
 
+# @deprecated Legacy variance-based DISTURBED detection. No longer used by any code.
+# Replaced by CONFIG_MONITOR_DSP_TKEO_LOW_X10 and DspDisturbanceDetector.
 config MONITOR_K_DISTURBED_X100
     int "DISTURBED to IDLE variance threshold multiplier (x100)"
     default 110
@@ -175,6 +179,8 @@ config MONITOR_K_DISTURBED_X100
     help
         Multiplier (scaled by 100) for IDLE variance. E.g., 110 means short variance must fall below 1.1x of the 5-min IDLE variance.
 
+# @deprecated Legacy absolute minimum variance floor. No longer used by any code.
+# Replaced by DspDisturbanceDetector which uses TKEO + gmag thresholds.
 config MONITOR_ABS_MIN_VAR_X10000
     int "Absolute minimum variance floor (x10000)"
     default 50

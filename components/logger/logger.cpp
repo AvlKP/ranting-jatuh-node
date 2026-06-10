@@ -6,6 +6,7 @@
 #include <cstring>
 #include <ctime>
 
+#include "esp_heap_caps.h"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "sdkconfig.h"
@@ -20,7 +21,9 @@ constexpr std::uint64_t kPublishPeriodUs =
     static_cast<std::uint64_t>(CONFIG_LOGGER_WIFI_PERIOD_HOURS) * 60ULL * 1000000ULL;
 
 static const char* kTag = "LOGGER";
-constexpr std::size_t kTaskStackSize = 6144U;
+constexpr std::size_t kTaskStackSize = 4096U;
+static_assert(kTaskStackSize >= 2048U, "Logger task stack too small for ESP-IDF task minimum.");
+static_assert(kTaskStackSize <= 8192U, "Logger task stack exceeds bounded RAM budget.");
 constexpr UBaseType_t kTaskPriority = 4U;
 constexpr BaseType_t kTaskCore = 0;
 
@@ -215,7 +218,7 @@ bool Logger::Init(const Config& config) noexcept {
     sd_mount_point_ = config.sd_mount_point;
     storage::SetMountPoint(sd_mount_point_);
 
-    if (!mqtt::Init()) {
+    if (!mqtt::InitCore()) {
         ESP_LOGE(kTag, "MQTT init failed");
     }
 
@@ -250,6 +253,11 @@ bool Logger::Init(const Config& config) noexcept {
     return true;
 }
 
+// ============================================================================
+// ESP Event Handler — called from system event task, must be non-blocking.
+// Copies event data into FreeRTOS queue with zero wait. Tracks drops per
+// event type for backpressure diagnostics.
+// ============================================================================
 void Logger::EventHandler(void* handler_args,
                            esp_event_base_t base,
                            std::int32_t id,
@@ -292,13 +300,25 @@ bool Logger::Start() noexcept {
         &task_handle_,
         kTaskCore);
     if (ret != pdPASS) {
-        ESP_LOGE(kTag, "Failed to create logger_task");
+        const std::uint32_t free_internal = static_cast<std::uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        const std::uint32_t largest_block = static_cast<std::uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        ESP_LOGE(kTag, "Failed to create logger_task (stack=%u free_internal=%lu largest_block=%lu)",
+                 static_cast<unsigned>(kTaskStackSize),
+                 static_cast<unsigned long>(free_internal),
+                 static_cast<unsigned long>(largest_block));
         return false;
     }
     ESP_LOGI(kTag, "logger_task started on core %d, priority %u", kTaskCore, kTaskPriority);
     return true;
 }
 
+// ============================================================================
+// Logger Task Loop — runs on core 0, priority 4.
+// Blocks on queue receive (100ms tick), then:
+//   - Parameters: format CSV + JSON, write CSV to SD, queue JSON for MQTT batch
+//   - Failures: publish MQTT immediately, write CSV to SD
+// Batch publishes pending JSON parameters when queue is non-empty.
+// ============================================================================
 void Logger::TaskLoop() noexcept {
     while (true) {
         Event event{};

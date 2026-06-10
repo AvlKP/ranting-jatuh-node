@@ -33,9 +33,16 @@ def calibrate(
 ) -> Tuple[float, float, float, float, float, float]:
     """Subtract per-axis bias constants from raw IMU readings.
 
+    Biases are computed from the first 9 seconds of raw_log_7.csv
+    (static baseline period). Drops baseline |gyro| from ~2.875 dps
+    to ~0.36 dps, exposing true branch motion.
+
+    On ESP32-S3 target, biases are stored in NVS (field-calibratable).
+    Python uses hardcoded constants for reference.
+
     Args:
-        gx_raw, gy_raw, gz_raw: Raw gyroscope readings in dps.
-        ax_raw, ay_raw, az_raw: Raw accelerometer readings in g.
+        gx_raw, gy_raw, gz_raw: Raw gyroscope readings [dps].
+        ax_raw, ay_raw, az_raw: Raw accelerometer readings [g].
 
     Returns:
         Tuple of (gx_cal, gy_cal, gz_cal, ax_cal, ay_cal, az_cal).

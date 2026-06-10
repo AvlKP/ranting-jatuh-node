@@ -1,3 +1,11 @@
+/// @file dashboard.hpp
+/// @brief HTTP debug dashboard for real-time monitoring.
+/// @details Serves a web UI via ESP HTTP server with endpoints for live status
+/// (WiFi, MQTT, heap, state), IMU tilt history, FFT data, SD file listing,
+/// MQTT logs, and node configuration. Used during development and field trials
+/// for observability without external debugger.
+/// @ingroup dashboard
+
 #pragma once
 
 #include "esp_err.h"
@@ -8,13 +16,17 @@
 
 namespace dashboard {
 
+/// @brief HTTP debug dashboard with live monitoring endpoints.
 class Dashboard {
 public:
+    /// @brief Dashboard configuration.
     struct Config {
-        std::uint16_t port{80};
-        bool enabled{true};
+        std::uint16_t port{80};   ///< HTTP server port.
+        bool enabled{true};       ///< Enable/disable dashboard at runtime.
     };
 
+    /// @param monitor Reference to the active Monitor instance.
+    /// @param logger Reference to the active Logger instance.
     explicit Dashboard(monitor::Monitor& monitor, logger::Logger& logger) noexcept;
     ~Dashboard() noexcept;
 

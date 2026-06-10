@@ -15,6 +15,7 @@
 #include "esp_adc/adc_oneshot.h"
 #include "esp_err.h"
 #include "esp_attr.h"
+#include "esp_heap_caps.h"
 
 #define LOG_LOCAL_LEVEL ESP_LOG_INFO
 #include "esp_log.h"
@@ -28,7 +29,9 @@ namespace {
 constexpr float kPi = 3.14159265358979323846f;
 constexpr float kTwoPi = 6.2831853071795864769f;
 static const char* kTag = "MONITOR";
-constexpr std::size_t kTaskStackSize = 8192U;
+constexpr std::size_t kTaskStackSize = 6144U;
+static_assert(kTaskStackSize >= 2048U, "Monitor task stack too small for ESP-IDF task minimum.");
+static_assert(kTaskStackSize <= 16384U, "Monitor task stack exceeds bounded RAM budget.");
 constexpr UBaseType_t kTaskPriority = 5U;
 constexpr BaseType_t kTaskCore = 1;
 
@@ -206,7 +209,12 @@ bool Monitor::Start() noexcept {
         &task_handle_,
         kTaskCore);
     if (ret != pdPASS) {
-        ESP_LOGE(kTag, "Failed to create monitor_task");
+        const std::uint32_t free_internal = static_cast<std::uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        const std::uint32_t largest_block = static_cast<std::uint32_t>(heap_caps_get_largest_free_block(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
+        ESP_LOGE(kTag, "Failed to create monitor_task (stack=%u free_internal=%lu largest_block=%lu)",
+                 static_cast<unsigned>(kTaskStackSize),
+                 static_cast<unsigned long>(free_internal),
+                 static_cast<unsigned long>(largest_block));
         return false;
     }
     ESP_LOGI(kTag, "monitor_task started on core %d, priority %u", kTaskCore, kTaskPriority);
@@ -1440,6 +1448,19 @@ void Monitor::SetConfidence(std::array<char, MonitorResult::kDampingConfidenceMa
 }
 
 Monitor::DecayOnsetResult Monitor::FindDecayOnsetTkeo() const noexcept {
+    // Algorithm: TKEO energy-burst decay onset detection.
+    // Identifies the start of free-decay oscillation in a disturbance segment.
+    //
+    // 1. Compute non-negative TKEO over gmag history: psi[n] = max(0, gmag[n]^2 - gmag[n-1]*gmag[n+1])
+    // 2. Set energy floor: (10 * baseline_gmag)^2 to reject pull-hold/static noise
+    // 3. Threshold = max(energy_floor, 0.30 * max(psi)) selects the last significant energy burst
+    // 4. Find last index where psi > threshold (scan backward)
+    // 5. Snap to nearest local gmag maximum within +/-0.45s window
+    // 6. Validate: at least 20 samples and 2x amplitude drop from onset to tail
+    //
+    // Quality: Reliable if both gates pass; Low if region exists but fails gates; None if no burst found.
+    //
+    // @see imu_algorithms/_envelope.py::find_decay_onset_tkeo
     DecayOnsetResult result{};
     const std::size_t count = BufferSize();
     if (count < 3U) {
@@ -1635,6 +1656,30 @@ Monitor::DampingFitResult Monitor::ComputePeakHoldDamping(std::size_t start,
                                                            std::size_t count,
                                                            float natural_freq_hz,
                                                            DecayQuality quality) noexcept {
+    // Algorithm: OLS log-fit damping ratio from peak-hold envelope.
+    //
+    // 1. Build asymmetric peak-hold envelope over gmag decay region:
+    //    env[0] = gmag[start]
+    //    env[n] = max(gmag[n], alpha * env[n-1])  where alpha = exp(-2*pi*fc*dt), fc = 2 Hz
+    //    Rises instantly with signal, decays exponentially between peaks.
+    //
+    // 2. Skip first ~1 cycle (transient) to avoid onset artifacts.
+    //
+    // 3. Compute lower fit bound: max(4 * baseline_noise, 0.03 * peak_after_skip).
+    //    Only samples above this bound participate in the fit (bounded fit mode).
+    //
+    // 4. OLS linear regression on ln(env) vs time:
+    //    slope = (N*sum(t*ln_e) - sum(t)*sum(ln_e)) / (N*sum(t^2) - (sum(t))^2)
+    //    zeta = -slope / (2*pi*fn)  clamped to [0, 1]
+    //
+    // 5. R-squared: 1 - SS_res / SS_tot
+    //
+    // 6. Confidence: high  (r^2>0.90, 3+ cycles, >4 samples/cycle, quality==Reliable)
+    //                medium (r^2>0.70, amplitude drop > 2x)
+    //                low    (otherwise)
+    //
+    // @see imu_algorithms/_envelope.py::damping_from_envelope
+    // @see imu_algorithms/_envelope.py::envelope_peak_hold
     DampingFitResult result{};
     SetConfidence(result.confidence, "low");
     if ((quality == DecayQuality::None) || (natural_freq_hz <= 0.0f) || (count < 10U)) {

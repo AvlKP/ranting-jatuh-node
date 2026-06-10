@@ -39,6 +39,13 @@ def extract_natural_frequency(segment: np.ndarray, dt: float) -> float:
     Designed for signed dominant-axis gyro data (not rectified gmag).
     Uses the actual segment length (no forced padding). Applies a Hann
     window and scans bins corresponding to 0.5-25 Hz.
+
+    Args:
+        segment: Signed gyro axis array from decay region.
+        dt: Sample period [s].
+
+    Returns:
+        Dominant natural frequency [Hz] or 0.0 if estimation fails.
     """
     n = len(segment)
     if n < 4:
@@ -74,6 +81,14 @@ def extract_frequency_zc(
     periods (2 zero-crossings per cycle), and returns 1/mean(period).
 
     Cheapest method (O(n), no FFT/windowing). Recommended ESP32 candidate.
+    Exists only in Python reference — intentionally not yet ported to C++.
+
+    Args:
+        signed_axis_seg: Signed gyro axis array from decay region.
+        dt: Sample period [s].
+
+    Returns:
+        Natural frequency [Hz] or 0.0 if insufficient crossings.
     """
     n = len(signed_axis_seg)
     if n < 3:
@@ -111,6 +126,15 @@ def extract_frequency_pk(
 
     Finds local maxima on the signed axis, computes inter-peak periods,
     excludes outliers (>3sigma from median), and returns 1/mean(period).
+
+    Exists only in Python reference — intentionally not yet ported to C++.
+
+    Args:
+        signed_axis_seg: Signed gyro axis array from decay region.
+        dt: Sample period [s].
+
+    Returns:
+        Natural frequency [Hz] or 0.0 if insufficient peaks.
     """
     n = len(signed_axis_seg)
     if n < 5:
@@ -158,13 +182,25 @@ def extract_active_region(
     """Identify the active sub-segment where branch motion exceeds threshold.
 
     Threshold priority:
-    1. If `threshold` is provided: use it directly.
-    2. Elif `ratio` is provided (DEPRECATED): threshold = ratio * peak_gmag.
-    3. Else (default): energy-adaptive RMS-based threshold.
+      1. If `threshold` is provided: use it directly.
+      2. Elif `ratio` is provided (DEPRECATED): threshold = ratio * peak_gmag.
+      3. Else (default): energy-adaptive RMS-based threshold.
+           RMS = sqrt(mean(segment^2))
+           threshold = max(baseline + 3.0, RMS / 3.0)
 
-    The RMS-based default works for all disturbance types without tuning:
-        RMS = sqrt(mean(segment^2))
-        threshold = max(baseline + 3.0, RMS / 3.0)
+    The RMS-based default works for all disturbance types without tuning.
+
+    Exists only in Python reference — intentionally not yet ported to C++.
+
+    Args:
+        segment: Gyro magnitude array over the event.
+        peak_gmag: Peak gyro magnitude during event [dps].
+        ratio: DEPRECATED. Ratio of peak for threshold.
+        threshold: Direct threshold override [dps].
+        baseline: Baseline noise level [dps] (default 0.35).
+
+    Returns:
+        Tuple of (active_start, active_end) sample indices.
     """
     n = len(segment)
     if n < 3:
@@ -198,6 +234,17 @@ def extract_active_sway(
 
     Integrates each signed gyro axis independently over the active window
     to obtain angular displacement in degrees, then returns peak-to-peak.
+
+    Args:
+        gyro_x_seg: X-axis gyro array for the full event [dps].
+        gyro_y_seg: Y-axis gyro array for the full event [dps].
+        gyro_z_seg: Z-axis gyro array for the full event [dps].
+        active_start: Start index from extract_active_region().
+        active_end: End index from extract_active_region().
+        dt: Sample period [s].
+
+    Returns:
+        Tuple of (sway_x_deg, sway_y_deg, sway_z_deg).
     """
     n_active = active_end - active_start + 1
     if n_active < 3:
@@ -231,10 +278,12 @@ def extract_tilt(
     which correctly handles dual-axis tilt and the full angle range.
 
     Args:
-        ax_segment, ay_segment, az_segment: Calibrated accel segments.
+        ax_segment: Calibrated X-axis accelerometer segment [g].
+        ay_segment: Calibrated Y-axis accelerometer segment [g].
+        az_segment: Calibrated Z-axis accelerometer segment [g].
 
     Returns:
-        (tilt_x_deg, tilt_y_deg).
+        Tuple of (tilt_x_deg, tilt_y_deg).
     """
     ax_mean = float(np.mean(ax_segment))
     ay_mean = float(np.mean(ay_segment))
@@ -251,7 +300,42 @@ def extract_tilt(
 
 @dataclass
 class EventResult:
-    """All extracted parameters for a detected disturbance event."""
+    """All extracted parameters for a detected disturbance event.
+
+    Attributes:
+        event_type: Disturbance classification (pull_release, oscillation, etc.).
+        onset_idx: Sample index where disturbance began.
+        offset_idx: Sample index where disturbance ended.
+        dur_samples: Total event duration in samples.
+        peak_gmag: Maximum gyro magnitude during event [dps].
+        natural_frequency_hz: Dominant natural frequency [Hz].
+        damping_ratio: Damping ratio zeta [0, 1].
+        damping_confidence: Fit confidence: "high", "medium", "low".
+        sway_x_deg: Integrated X-axis peak-to-peak sway [deg].
+        sway_y_deg: Integrated Y-axis peak-to-peak sway [deg].
+        sway_z_deg: Integrated Z-axis peak-to-peak sway [deg].
+        tilt_x_deg: Static X-axis tilt from accelerometer [deg].
+        tilt_y_deg: Static Y-axis tilt from accelerometer [deg].
+        is_truncated: True if event exceeded ring buffer capacity.
+        gmag_segment: Gyro magnitude array for the event (not repr'd).
+        ax_segment: X-axis accelerometer array (not repr'd).
+        ay_segment: Y-axis accelerometer array (not repr'd).
+        az_segment: Z-axis accelerometer array (not repr'd).
+        gx_segment: X-axis gyro array, calibrated (not repr'd).
+        gy_segment: Y-axis gyro array, calibrated (not repr'd).
+        gz_segment: Z-axis gyro array, calibrated (not repr'd).
+        fn_method: Frequency estimation method used: "fft", "zc", "pk", "null".
+        fn_zc_hz: Zero-crossing frequency estimate [Hz].
+        fn_pk_hz: Peak-to-peak frequency estimate [Hz].
+        damping_confidence_level: Same as damping_confidence (alternate key).
+        decay_onset_time_s: Time of decay onset [s].
+        decay_quality: Decay region quality from TKEO validation.
+        fit_samples: Number of samples used in OLS damping fit.
+        fit_cycles: Number of oscillation cycles used in OLS fit.
+        amplitude_drop: Ratio of max/min envelope in fit region.
+        r_squared: R-squared of OLS log-fit.
+        samples_per_cycle: Samples per oscillation cycle.
+    """
     event_type: str
     onset_idx: int
     offset_idx: int
@@ -293,6 +377,18 @@ class EventResult:
 
 class Pipeline:
     """Composes detection + ring buffer + extraction into one pipeline.
+
+    Processes raw IMU CSV files through both analysis planes:
+      Plane 1: Per-sample TKEO + Schmitt trigger → disturbance events.
+      Plane 2: Per-event post-hoc modal analysis → frequency + damping.
+
+    The pipeline auto-detects dt and baseline_gmag from the CSV data.
+
+    Attributes:
+        detector: EventDetector instance for real-time disturbance gating.
+        ring: RingBuffer for gmag history during disturbances.
+        dt: Sample period [s] (auto-detected from CSV).
+        baseline_gmag: Baseline gyro magnitude noise floor [dps].
 
     Usage:
         pipe = Pipeline()
@@ -597,6 +693,14 @@ class Pipeline:
 
 
 def run_pipeline(csv_path: str, verbose: bool = False) -> List[EventResult]:
-    """Convenience function to create a Pipeline, process a CSV, and return results."""
+    """Convenience function to create a Pipeline, process a CSV, and return results.
+
+    Args:
+        csv_path: Path to raw IMU CSV file.
+        verbose: If True, print frequency comparison diagnostics.
+
+    Returns:
+        List of EventResult objects, one per detected disturbance.
+    """
     pipe = Pipeline()
     return pipe.process_csv(csv_path, verbose=verbose)

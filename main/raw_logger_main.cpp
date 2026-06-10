@@ -1,3 +1,12 @@
+/// @file raw_logger_main.cpp
+/// @brief Alternate firmware entry point: raw IMU-to-SD CSV recorder.
+/// @details Builds when CONFIG_APP_BUILD_RAW_LOGGER is enabled. Bypasses
+/// all signal processing (monitor, logger, dashboard, MQTT) and writes
+/// raw LSM6DS3 accel/gyro/temperature readings directly to a timestamped
+/// CSV file on SD card. Used for data collection during algorithm validation
+/// and sensor calibration. Supports timed or indefinite recording.
+/// @ingroup main
+
 #include <cstdint>
 #include <cstdio>
 #include <cstring>

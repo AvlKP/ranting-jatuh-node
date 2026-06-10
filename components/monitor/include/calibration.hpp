@@ -1,3 +1,10 @@
+/// @file calibration.hpp
+/// @brief Per-axis IMU bias calibration data and NVS persistence.
+/// @details CalibrationBias holds six static offset values (accel in g, gyro in dps)
+/// computed from a static baseline period and stored in NVS. Biases default to zero
+/// if no NVS key exists, allowing field calibration without recompilation.
+/// @ingroup monitor
+
 #pragma once
 
 #include "nvs.h"

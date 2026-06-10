@@ -5,6 +5,12 @@
 
 namespace monitor {
 
+/// @brief 2nd-order Chebyshev Type 1 high-pass filter for per-axis accelerometer
+/// disturbance detection (Direct Form II biquad).
+///
+/// @deprecated Superseded by TKEO-based DspDisturbanceDetector. Legacy artifact
+/// from early HPF-based disturbance detection architecture. Retained for reference;
+/// not used in any production code path.
 class ChebyshevHpf {
 public:
     void update(float ax, float ay, float az) noexcept {

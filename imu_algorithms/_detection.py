@@ -10,14 +10,21 @@ from typing import Optional
 
 import numpy as np
 
+
 def tkeo(signal: np.ndarray) -> np.ndarray:
     """Apply Teager-Kaiser Energy Operator to a 1-D signal.
 
-    psi[n] = x[n]^2 - x[n-1]*x[n+1]
+    psi[n] = x[n]^2 - x[n-1] * x[n+1]
 
     Boundary handling:
-    - psi[0] = x[0]  (copy first sample)
-    - psi[N-1] = x[N-1]  (copy last sample)
+      - psi[0]    = x[0]   (copy first sample)
+      - psi[N-1]  = x[N-1] (copy last sample)
+
+    Args:
+        signal: 1-D numpy array of signal values.
+
+    Returns:
+        TKEO energy array of same length as input.
     """
     n = len(signal)
     if n < 3:
@@ -33,14 +40,18 @@ def tkeo(signal: np.ndarray) -> np.ndarray:
 def tkeo_streaming(x_n: float, x_n1: float, x_n2: float) -> float:
     """Single-sample TKEO for real-time streaming path.
 
-    psi[n] = x[n]^2 - x[n-1]*x[n+1]
+    psi[n] = x[n]^2 - x[n-1] * x[n+1]
 
-    With 1-sample latency.
+    Computes energy at the middle sample with 1-sample latency.
+    Designed for embedded deployment: one multiply-add per sample.
 
     Args:
-        x_n:   x[n] -- the middle sample being evaluated.
-        x_n1:  x[n-1] -- the sample before x_n.
-        x_n2:  x[n+1] -- the sample after x_n.
+        x_n:   x[n]      -- the middle sample being evaluated.
+        x_n1:  x[n-1]    -- the sample before x_n.
+        x_n2:  x[n+1]    -- the sample after x_n.
+
+    Returns:
+        TKEO energy value at sample n.
     """
     return x_n * x_n - x_n1 * x_n2
 
@@ -58,7 +69,15 @@ class State(Enum):
 
 @dataclass
 class Event:
-    """Detected disturbance event boundaries and running stats."""
+    """Detected disturbance event boundaries and running stats.
+
+    Attributes:
+        onset_idx: Sample index where disturbance began.
+        offset_idx: Sample index where disturbance ended.
+        offset_write_ptr: Current write pointer at offset time.
+        peak_gmag: Maximum gyro magnitude during event [dps].
+        dur_samples: Total duration in samples.
+    """
     onset_idx: int
     offset_idx: int
     offset_write_ptr: int
@@ -82,6 +101,13 @@ class EventDetector:
     Hysteresis (hi_thresh / lo_thresh) prevents chattering during
     low-amplitude oscillation phases. The minimum quiet period prevents
     false offsets during momentary amplitude dips.
+
+    Attributes:
+        hi_thresh: TKEO high threshold for disturbance entry (default 40.0).
+        lo_thresh: TKEO low threshold for quiet counting (default 5.0).
+        gmag_onset: Gyro magnitude onset threshold for immediate entry [dps].
+        gmag_thresh: Gyro magnitude threshold for quiet counting [dps].
+        min_quiet: Minimum consecutive quiet samples for IDLE transition.
     """
 
     def __init__(
@@ -111,6 +137,10 @@ class EventDetector:
 
     def process_sample(self, tkeo_val: float, gmag_val: float) -> Optional[Event]:
         """Process one sample through the state machine.
+
+        Args:
+            tkeo_val: TKEO energy value from tkeo_streaming().
+            gmag_val: Calibrated gyro magnitude [dps].
 
         Returns:
             Event when quiet_timer reaches min_quiet (disturbance ended),
@@ -152,13 +182,25 @@ class EventDetector:
 
 
 def classify_event(peak_gmag: float, dur_samples: int) -> str:
-    """Classify disturbance type using corrected thresholds.
+    """Classify disturbance type from peak magnitude and duration.
 
     Decision tree:
         peak_gmag >= 20.0                    -> pull_release
         peak_gmag >= 8.0  and dur > 80       -> oscillation
         peak_gmag < 8.0   and dur < 80       -> flick
         peak_gmag < 8.0   and dur >= 80      -> pull_hold
+
+    This function exists only in the Python reference. The C++ firmware
+    treats all disturbances uniformly (no event type classification).
+    Kept as algorithmic reference for future C++ porting.
+
+    Args:
+        peak_gmag: Maximum gyro magnitude during event [dps].
+        dur_samples: Event duration in samples.
+
+    Returns:
+        Event type string: "pull_release", "oscillation", "flick",
+        "pull_hold", or "unknown".
     """
     if peak_gmag >= 20.0:
         return "pull_release"
@@ -173,5 +215,18 @@ def classify_event(peak_gmag: float, dur_samples: int) -> str:
 
 
 def is_dynamic(event_type: str) -> bool:
-    """Two-class grouping: dynamic events yield biomechanical parameters."""
+    """Check if event type is dynamic (yields biomechanical parameters).
+
+    Dynamic events: pull_release, oscillation.
+    Non-dynamic: flick, pull_hold, unknown.
+
+    This function exists only in the Python reference. The C++ firmware
+    computes damping on all disturbances without event type gating.
+
+    Args:
+        event_type: Event type string from classify_event().
+
+    Returns:
+        True if the event is a dynamic type suitable for damping analysis.
+    """
     return event_type in ("pull_release", "oscillation")

@@ -1,3 +1,25 @@
+/// @file pins.hpp
+/// @brief GPIO pin assignments for the custom PCB.
+/// @details Pinout for ESP32-S3FH4R2 on the branch monitoring sensor board.
+/// Defines pins for LSM6DS3 I2C, microSD SDIO/SPI, UART, acoustic emission
+/// sensor (GPIO and ADC), and SD detect/battery monitor.
+/// @ingroup main
+///
+/// @par Pin Assignment Table
+/// | Signal       | GPIO | Function               |
+/// |--------------|------|------------------------|
+/// | IMU_SDA      |   5  | I2C Data               |
+/// | IMU_SCL      |   6  | I2C Clock              |
+/// | SD_CLK       |  12  | SDIO/SPI Clock         |
+/// | SD_CMD_DI    |  11  | SDIO CMD / SPI MOSI    |
+/// | SD_DAT0_DO   |  13  | SDIO DAT0 / SPI MISO   |
+/// | SD_DAT3_CS   |  10  | SPI Chip Select        |
+/// | SD_DET       |   9  | Card detect             |
+/// | AE_ADC_PIN   |  14  | ADC1_CH3 analog input   |
+/// | AE_GPIO_PIN  |  15  | Digital interrupt input |
+/// | TX_PIN       |  43  | Debug UART TX           |
+/// | RX_PIN       |  44  | Debug UART RX           |
+
 #include <driver/gpio.h>
 
 namespace pins {
