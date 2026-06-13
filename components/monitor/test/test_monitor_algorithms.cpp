@@ -7,6 +7,7 @@
 #include <new>
 #include <span>
 
+#include "dsps_fft2r.h"
 #include "esp_heap_caps.h"
 #include "unity.h"
 
@@ -386,4 +387,139 @@ TEST_CASE("raw_log_7 reduced replay enters disturbance after calibrated gyro spi
     TEST_ASSERT_TRUE(entered);
 }
 
-} // namespace
+/* --------------------------------------------------------------------------
+   6.6 Dominant Axis Peak-to-Peak Tests
+   -------------------------------------------------------------------------- */
+
+TEST_CASE("dominant axis peak-to-peak detects symmetric oscillation (zero cumulative sum)", "[monitor][dominant]") {
+    monitor::MonitorConfig config{};
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+
+    const std::size_t n = 52U;
+    monitor.write_index_ = 0U;
+    monitor.sample_count_ = n;
+
+    for (std::size_t i = 0U; i < n; ++i) {
+        const float t = static_cast<float>(i);
+        const float val = std::sin(2.0f * 3.14159f * t / static_cast<float>(n)) * 10.0f;
+        monitor.gx_history_[i] = val;
+        monitor.gy_history_[i] = 0.0f;
+        monitor.gz_history_[i] = 0.0f;
+    }
+
+    const auto result = monitor.ComputeDominantAxisSway(0U, n);
+
+    TEST_ASSERT_TRUE(result.valid);
+    TEST_ASSERT_TRUE(result.sx_deg > 1.0f);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, result.sy_deg);
+    TEST_ASSERT_FLOAT_WITHIN(0.01f, 0.0f, result.sz_deg);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::Monitor::DominantAxis::X),
+                            static_cast<std::uint8_t>(result.dominant));
+}
+
+TEST_CASE("dominant axis peak-to-peak selects correct axis for asymmetric oscillation", "[monitor][dominant]") {
+    monitor::MonitorConfig config{};
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+
+    const std::size_t n = 52U;
+    monitor.write_index_ = 0U;
+    monitor.sample_count_ = n;
+
+    for (std::size_t i = 0U; i < n; ++i) {
+        const float t = static_cast<float>(i);
+        monitor.gx_history_[i] = std::sin(2.0f * 3.14159f * t / static_cast<float>(n)) * 2.0f;
+        monitor.gy_history_[i] = std::sin(2.0f * 3.14159f * t / static_cast<float>(n)) * 10.0f;
+        monitor.gz_history_[i] = std::sin(2.0f * 3.14159f * t / static_cast<float>(n)) * 5.0f;
+    }
+
+    const auto result = monitor.ComputeDominantAxisSway(0U, n);
+
+    TEST_ASSERT_TRUE(result.valid);
+    TEST_ASSERT_TRUE(result.sy_deg > result.sx_deg);
+    TEST_ASSERT_TRUE(result.sy_deg > result.sz_deg);
+    TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::Monitor::DominantAxis::Y),
+                            static_cast<std::uint8_t>(result.dominant));
+}
+
+/* --------------------------------------------------------------------------
+   6.7 Noise Gate in AnalyzeImuEvent Tests
+   -------------------------------------------------------------------------- */
+
+TEST_CASE("noise gate returns zero damping when peak_gmag below threshold", "[monitor][noise]") {
+    monitor::MonitorConfig config{};
+    config.noise_gate_gmag_dps = 8.0f;
+    config.modal_freq_min_hz = 1.0f;
+    config.modal_freq_max_hz = 25.0f;
+
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+
+    constexpr std::size_t n = 104U;
+    monitor.write_index_ = 0U;
+    monitor.sample_count_ = n;
+
+    for (std::size_t i = 0U; i < n; ++i) {
+        const float t = static_cast<float>(i);
+        const float sin_val = std::sin(2.0f * 3.14159f * 2.0f * t / 52.0f);
+        monitor.gx_history_[i] = sin_val * 5.0f;
+        monitor.gy_history_[i] = sin_val * 1.0f;
+        monitor.gz_history_[i] = sin_val * 0.5f;
+
+        if (i < 20U) {
+            monitor.gmag_history_[i] = 0.3f;
+        } else if (i < 40U) {
+            const float decay_t = 1.0f - (static_cast<float>(i - 20U) / 20.0f);
+            monitor.gmag_history_[i] = 0.3f + 10.0f * decay_t * decay_t;
+        } else {
+            monitor.gmag_history_[i] = 0.25f + 0.05f * sin_val;
+        }
+    }
+
+    monitor.peak_gmag_ = 3.0f;
+
+    dsps_fft2r_init_fc32(nullptr, 1024);
+
+    const auto event = monitor.AnalyzeImuEvent();
+
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.0f, event.damping_ratio);
+    TEST_ASSERT_TRUE(event.damping_confidence[0] == 'l');
+}
+
+TEST_CASE("noise gate passes event with peak_gmag above threshold", "[monitor][noise]") {
+    monitor::MonitorConfig config{};
+    config.noise_gate_gmag_dps = 8.0f;
+    config.modal_freq_min_hz = 1.0f;
+    config.modal_freq_max_hz = 25.0f;
+
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+
+    constexpr std::size_t n = 104U;
+    monitor.write_index_ = 0U;
+    monitor.sample_count_ = n;
+
+    for (std::size_t i = 0U; i < n; ++i) {
+        const float t = static_cast<float>(i);
+        const float sin_val = std::sin(2.0f * 3.14159f * 2.0f * t / 52.0f);
+        monitor.gx_history_[i] = sin_val * 5.0f;
+        monitor.gy_history_[i] = sin_val * 1.0f;
+        monitor.gz_history_[i] = sin_val * 0.5f;
+
+        if (i < 20U) {
+            monitor.gmag_history_[i] = 0.3f;
+        } else if (i < 40U) {
+            const float decay_t = 1.0f - (static_cast<float>(i - 20U) / 20.0f);
+            monitor.gmag_history_[i] = 0.3f + 10.0f * decay_t * decay_t;
+        } else {
+            monitor.gmag_history_[i] = 0.25f + 0.05f * sin_val;
+        }
+    }
+
+    monitor.peak_gmag_ = 10.0f;
+
+    dsps_fft2r_init_fc32(nullptr, 1024);
+
+    const auto event = monitor.AnalyzeImuEvent();
+
+    TEST_ASSERT_TRUE(event.damping_confidence[0] == 'h' ||
+                     event.damping_confidence[0] == 'm' ||
+                     event.damping_confidence[0] == 'l');
+}

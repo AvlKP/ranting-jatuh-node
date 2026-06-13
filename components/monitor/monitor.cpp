@@ -407,12 +407,14 @@ void Monitor::PushSample(float roll, float pitch,
                 reset_from_short();
 
                 disturbed_exit_debounce_counter_ = 0U;
+                peak_gmag_ = gmag;
 
                 ESP_LOGI(kTag, "Transition: IDLE -> DISTURBED (gmag=%.6f tkeo=%.6f)",
                          static_cast<double>(gmag), static_cast<double>(tkeo));
             }
         } else if (state_ == NodeState::DISTURBED) {
             append_history(roll, pitch, gx, gy, gz, ax, ay, az, gmag);
+            peak_gmag_ = std::max(peak_gmag_, gmag);
 
             bool transitioned = false;
             disturbed_exit_debounce_counter_ = dsp_detector_.QuietCount();
@@ -441,6 +443,10 @@ void Monitor::PushSample(float roll, float pitch,
 
     if (should_compute) {
         static_cast<void>(ComputeAndPublish(pub_state, is_exit));
+        if (is_exit) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            peak_gmag_ = 0.0f;
+        }
         if (should_reset_after_compute) {
             std::lock_guard<std::mutex> lock(mutex_);
             write_index_ = 0U;
@@ -867,16 +873,40 @@ Monitor::SwayAxisResult Monitor::ComputeDominantAxisSway(std::size_t start, std:
     }
 
     const float dt = 1.0f / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+    float min_x = 0.0f, max_x = 0.0f;
+    float min_y = 0.0f, max_y = 0.0f;
+    float min_z = 0.0f, max_z = 0.0f;
+    bool first = true;
+
     for (std::size_t i = start; i < end; ++i) {
         const std::size_t idx = PhysicalIndex(i);
-        result.sx_deg += gx_history_[idx] * dt;
-        result.sy_deg += gy_history_[idx] * dt;
-        result.sz_deg += gz_history_[idx] * dt;
+        cx += gx_history_[idx] * dt;
+        cy += gy_history_[idx] * dt;
+        cz += gz_history_[idx] * dt;
+
+        if (first) {
+            min_x = max_x = cx;
+            min_y = max_y = cy;
+            min_z = max_z = cz;
+            first = false;
+        } else {
+            if (cx < min_x) min_x = cx;
+            if (cx > max_x) max_x = cx;
+            if (cy < min_y) min_y = cy;
+            if (cy > max_y) max_y = cy;
+            if (cz < min_z) min_z = cz;
+            if (cz > max_z) max_z = cz;
+        }
     }
 
-    const float ax_abs = std::fabs(result.sx_deg);
-    const float ay_abs = std::fabs(result.sy_deg);
-    const float az_abs = std::fabs(result.sz_deg);
+    result.sx_deg = max_x - min_x;
+    result.sy_deg = max_y - min_y;
+    result.sz_deg = max_z - min_z;
+
+    const float ax_abs = result.sx_deg;
+    const float ay_abs = result.sy_deg;
+    const float az_abs = result.sz_deg;
     if (ax_abs >= ay_abs && ax_abs >= az_abs) {
         result.dominant = DominantAxis::X;
         result.valid = ax_abs > 0.0f;
@@ -1114,6 +1144,14 @@ Monitor::EventAnalysisResult Monitor::AnalyzeImuEvent() noexcept {
     const std::size_t decay_count = count - decay.onset;
     result.natural_freq_hz = ComputeSignedAxisNaturalFrequency(sway.dominant, decay.onset, decay_count);
     if (result.natural_freq_hz <= 0.0f) {
+        return result;
+    }
+
+    if (peak_gmag_ < config_.noise_gate_gmag_dps) {
+        ESP_LOGD(kTag, "Noise gate: peak_gmag=%.3f < threshold=%.3f, skipping damping",
+                 static_cast<double>(peak_gmag_), static_cast<double>(config_.noise_gate_gmag_dps));
+        result.damping_ratio = 0.0f;
+        SetConfidence(result.damping_confidence, "low");
         return result;
     }
 

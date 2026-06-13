@@ -79,6 +79,7 @@ struct MonitorConfig {
     float dsp_gmag_onset_dps{static_cast<float>(CONFIG_MONITOR_DSP_GMAG_ONSET_X100) / 100.0f}; ///< Gyro magnitude threshold for DISTURBED entry [dps].
     float dsp_gmag_quiet_dps{static_cast<float>(CONFIG_MONITOR_DSP_GMAG_QUIET_X100) / 100.0f}; ///< Gyro magnitude threshold for DISTURBED exit debounce [dps].
     std::size_t dsp_quiet_debounce{static_cast<std::size_t>(CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE)}; ///< Consecutive quiet samples required for IDLE transition.
+    float noise_gate_gmag_dps{static_cast<float>(CONFIG_MONITOR_NOISE_GATE_GMAG_X10) / 10.0f}; ///< Minimum peak gyro magnitude for damping computation [dps].
 };
 
 /// @brief Disturbance state machine states.
@@ -286,11 +287,11 @@ private:
         std::size_t onset{0U};          ///< Sample index where free-decay begins.
         DecayQuality quality{DecayQuality::None}; ///< Validation quality of the detected region.
     };
-    /// @brief Integrated gyro sway per axis and dominant axis selection.
+    /// @brief Peak-to-peak angular displacement per axis and dominant axis selection.
     struct SwayAxisResult {
-        float sx_deg{0.0f};             ///< Integrated X-axis angular displacement [deg].
-        float sy_deg{0.0f};             ///< Integrated Y-axis angular displacement [deg].
-        float sz_deg{0.0f};             ///< Integrated Z-axis angular displacement [deg].
+        float sx_deg{0.0f};             ///< Peak-to-peak X-axis angular displacement [deg].
+        float sy_deg{0.0f};             ///< Peak-to-peak Y-axis angular displacement [deg].
+        float sz_deg{0.0f};             ///< Peak-to-peak Z-axis angular displacement [deg].
         DominantAxis dominant{DominantAxis::X}; ///< Axis with largest displacement.
         bool valid{false};              ///< false if no valid sway detected.
     };
@@ -315,10 +316,11 @@ private:
     /// @return DecayOnsetResult with onset index and quality classification.
     /// @see imu_algorithms/_envelope.py::find_decay_onset_tkeo
     [[nodiscard]] DecayOnsetResult FindDecayOnsetTkeo() const noexcept;
-    /// @brief Integrate gyro axes over full buffer and select dominant axis.
+    /// @brief Integrate gyro axes over full buffer and select dominant axis
+    /// via peak-to-peak angular displacement (max - min of cumulative angle).
     /// @param start Start sample index.
     /// @param end End sample index (exclusive).
-    /// @return SwayAxisResult with per-axis displacements and dominant axis.
+    /// @return SwayAxisResult with per-axis peak-to-peak displacements and dominant axis.
     [[nodiscard]] SwayAxisResult ComputeDominantAxisSway(std::size_t start, std::size_t end) const noexcept;
     /// @brief Compute valid FFT bin range from modal frequency band configuration.
     /// @param fft_size FFT window size for bin calculation.
@@ -411,6 +413,8 @@ private:
 
 
     NodeState state_{NodeState::IDLE};
+
+    float peak_gmag_{0.0f};
 
     std::array<float, kFftWindowSamples * 2U> fft_input_{};
     std::array<float, kFftWindowSamples / 2U> psd_accum_{};

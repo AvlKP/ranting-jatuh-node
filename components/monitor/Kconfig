@@ -147,6 +147,15 @@ config MONITOR_DISTURBED_EXIT_DEBOUNCE
     help
         Number of consecutive samples below the low threshold to transition to IDLE.
 
+config MONITOR_NOISE_GATE_GMAG_X10
+    int "Noise gate minimum peak gyro magnitude (dps x10)"
+    default 80
+    range 0 100000
+    help
+        Minimum peak gyro magnitude for damping computation.
+        Default 80 means 8.0 dps. Events with peak gyro magnitude
+        below this threshold skip damping ratio computation.
+
 endmenu
 
 
