@@ -35,7 +35,10 @@ void LogTaskStackHighWatermark(const char* task_name, TaskHandle_t task) {
     ESP_LOGI(kVerifyTag, "%s stack high-water: %u bytes", task_name, bytes);
 }
 
-void LogRuntimeDiagnostics(const char* stage, TaskHandle_t monitor_task, TaskHandle_t logger_task) {
+void LogRuntimeDiagnostics(const char* stage,
+                           TaskHandle_t monitor_task,
+                           TaskHandle_t logger_task,
+                           TaskHandle_t ae_spectral_task) {
     ESP_LOGI(kVerifyTag,
              "%s stack guards: freertos_canary=%d compiler_mode_none=%d esp_event_task_stack=%d esp_timer_task_stack=%d",
              stage,
@@ -46,6 +49,7 @@ void LogRuntimeDiagnostics(const char* stage, TaskHandle_t monitor_task, TaskHan
     LogStackHighWatermark(stage);
     LogTaskStackHighWatermark("monitor_task", monitor_task);
     LogTaskStackHighWatermark("logger_task", logger_task);
+    LogTaskStackHighWatermark("ae_spectral_task", ae_spectral_task);
 
 #if defined(INCLUDE_xTaskGetHandle) && INCLUDE_xTaskGetHandle
     LogTaskStackHighWatermark("esp_event", xTaskGetHandle("esp_event"));

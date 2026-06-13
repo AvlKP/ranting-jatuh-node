@@ -37,6 +37,12 @@ constexpr std::size_t kFftWindowSamples = 1024U;
 constexpr std::size_t kFftOverlapSamples = kFftWindowSamples / 2U;
 /// @brief Maximum disturbance event sample storage.
 constexpr std::size_t kEventSamples = 2048U;
+/// @brief Maximum AE spectral FFT window for persistent buffers.
+constexpr std::size_t kAeSpectralMaxWindowSamples =
+    static_cast<std::size_t>(CONFIG_MONITOR_AE_SPECTRAL_WINDOW_SIZE);
+/// @brief Maximum AE spectral gradient history for persistent buffers.
+constexpr std::size_t kAeSpectralMaxGradientSamples =
+    static_cast<std::size_t>(CONFIG_MONITOR_AE_SPECTRAL_GRADIENT_WINDOW);
 
 static_assert(kStorageSamples >= kFftWindowSamples,
               "Monitor storage window must be >= FFT window.");
@@ -48,6 +54,14 @@ static_assert(CONFIG_MONITOR_N_DPAD < kStorageSamples,
               "DISTURBED refresh margin must be smaller than storage window.");
 static_assert(CONFIG_MONITOR_N_DPAD < kEventSamples,
               "DISTURBED refresh margin must be smaller than event window.");
+static_assert(kAeSpectralMaxWindowSamples >= 64U,
+              "AE spectral window too small.");
+static_assert((kAeSpectralMaxWindowSamples & (kAeSpectralMaxWindowSamples - 1U)) == 0U,
+              "AE spectral window must be a power of two.");
+static_assert(kAeSpectralMaxWindowSamples <= 1024U,
+              "AE spectral window exceeds bounded RAM budget.");
+static_assert(kAeSpectralMaxGradientSamples <= 256U,
+              "AE spectral gradient window exceeds bounded RAM budget.");
 
 /// @brief Single IMU sample snapshot for dashboard streaming.
 struct StreamSample {
@@ -80,6 +94,17 @@ struct MonitorConfig {
     float dsp_gmag_quiet_dps{static_cast<float>(CONFIG_MONITOR_DSP_GMAG_QUIET_X100) / 100.0f}; ///< Gyro magnitude threshold for DISTURBED exit debounce [dps].
     std::size_t dsp_quiet_debounce{static_cast<std::size_t>(CONFIG_MONITOR_DISTURBED_EXIT_DEBOUNCE)}; ///< Consecutive quiet samples required for IDLE transition.
     float noise_gate_gmag_dps{static_cast<float>(CONFIG_MONITOR_NOISE_GATE_GMAG_X10) / 10.0f}; ///< Minimum peak gyro magnitude for damping computation [dps].
+    std::uint32_t spectral_sample_rate_hz{static_cast<std::uint32_t>(CONFIG_MONITOR_AE_SPECTRAL_SAMPLE_RATE_HZ)}; ///< AE spectral ADC sample rate [Hz].
+    std::size_t spectral_window_size{static_cast<std::size_t>(CONFIG_MONITOR_AE_SPECTRAL_WINDOW_SIZE)}; ///< AE spectral FFT window length [samples].
+    std::size_t spectral_bin_start{static_cast<std::size_t>(CONFIG_MONITOR_AE_SPECTRAL_BIN_START)}; ///< Inclusive AE spectral energy start bin.
+    std::size_t spectral_bin_end{static_cast<std::size_t>(CONFIG_MONITOR_AE_SPECTRAL_BIN_END)}; ///< Inclusive AE spectral energy end bin.
+    float spectral_leak_alpha{static_cast<float>(CONFIG_MONITOR_AE_SPECTRAL_LEAK_ALPHA_X100) / 100.0f}; ///< AE spectral leaking integrator alpha.
+    float spectral_ewma_alpha{static_cast<float>(CONFIG_MONITOR_AE_SPECTRAL_EWMA_ALPHA_X100) / 100.0f}; ///< AE spectral EWMA baseline alpha.
+    float spectral_danger_multiplier{static_cast<float>(CONFIG_MONITOR_AE_SPECTRAL_DANGER_MULTIPLIER_X10) / 10.0f}; ///< AE spectral dynamic threshold multiplier.
+    std::size_t spectral_gradient_window{static_cast<std::size_t>(CONFIG_MONITOR_AE_SPECTRAL_GRADIENT_WINDOW)}; ///< AE spectral gradient history length.
+    float spectral_jump_threshold{static_cast<float>(CONFIG_MONITOR_AE_SPECTRAL_JUMP_THRESHOLD_X10) / 10.0f}; ///< AE spectral energy-jump latch threshold.
+    std::uint32_t spectral_latch_duration_ms{static_cast<std::uint32_t>(CONFIG_MONITOR_AE_SPECTRAL_LATCH_DURATION_MS)}; ///< AE spectral latch hold time [ms].
+    std::uint32_t spectral_min_publish_interval_ms{static_cast<std::uint32_t>(CONFIG_MONITOR_AE_SPECTRAL_MIN_PUBLISH_INTERVAL_MS)}; ///< AE spectral repeat publish interval [ms].
 };
 
 /// @brief Disturbance state machine states.
@@ -183,6 +208,59 @@ private:
     std::size_t quiet_count_{0U};
 };
 
+/// @brief Output of one AE spectral detector state update.
+struct AeSpectralUpdateResult {
+    float energy{0.0f};              ///< High-frequency energy from current FFT window.
+    float gradient{0.0f};            ///< Leaking-integrator gradient over configured window.
+    float danger_threshold{0.0f};    ///< Current adaptive danger threshold.
+    float ewma_mean{0.0f};           ///< EWMA mean of normal gradients.
+    float sigma{0.1f};               ///< EWMA standard deviation, clamped to >= 0.1.
+    bool latch_active{false};        ///< Energy-jump latch currently active.
+    bool latch_started{false};       ///< Latch transitioned inactive to active this update.
+    bool danger_active{false};       ///< Adaptive gradient danger currently active.
+    bool danger_started{false};      ///< Danger transitioned inactive to active this update.
+    bool should_publish{false};      ///< Caller should publish FailureEvent::AcousticEmission.
+};
+
+/// @brief Bounded acoustic-emission spectral detector state machine.
+class AeSpectralDetector {
+public:
+    /// @brief Validate runtime detector configuration against fixed buffers and FFT bounds.
+    [[nodiscard]] static bool ValidateConfig(const MonitorConfig& config) noexcept;
+    /// @brief Sum configured complex FFT magnitudes and divide by 1000.0.
+    [[nodiscard]] static float ComputeEnergyFromComplexBins(const float* fft_data,
+                                                            std::size_t fft_size,
+                                                            std::size_t bin_start,
+                                                            std::size_t bin_end) noexcept;
+    /// @brief Apply Hamming window, run FFT, and compute high-frequency energy.
+    [[nodiscard]] static bool ComputeWindowEnergy(const std::uint16_t* samples,
+                                                  const MonitorConfig& config,
+                                                  float* fft_buffer,
+                                                  std::size_t fft_buffer_len,
+                                                  float& out_energy) noexcept;
+    /// @brief Reset detector history and active states.
+    void Reset() noexcept;
+    /// @brief Update latch, integrator, gradient, baseline, and publish gate from one energy sample.
+    [[nodiscard]] AeSpectralUpdateResult UpdateEnergy(float energy,
+                                                      std::uint64_t now_ms,
+                                                      const MonitorConfig& config) noexcept;
+
+private:
+    std::array<float, kAeSpectralMaxGradientSamples> gradient_ring_{};
+    std::size_t gradient_write_index_{0U};
+    std::size_t gradient_count_{0U};
+    float previous_energy_{0.0f};
+    bool has_previous_energy_{false};
+    float integrator_{0.0f};
+    float ewma_mean_{0.0f};
+    float ewma_variance_{0.01f};
+    float sigma_{0.1f};
+    std::uint64_t latch_until_ms_{0U};
+    std::uint64_t last_publish_ms_{0U};
+    bool latch_active_{false};
+    bool danger_active_{false};
+};
+
 /// @brief Tree branch structural health monitor.
 ///
 /// Coordinatesthe IMU sensor, adaptive complementary filter, disturbance
@@ -241,6 +319,8 @@ public:
     [[nodiscard]] NodeState GetState() const noexcept { return state_; }
     /// @brief FreeRTOS task handle of the monitor task.
     [[nodiscard]] TaskHandle_t GetTaskHandle() const noexcept { return task_handle_; }
+    /// @brief FreeRTOS task handle of the AE spectral task when spectral mode is enabled.
+    [[nodiscard]] TaskHandle_t GetAeSpectralTaskHandle() const noexcept { return ae_spectral_task_handle_; }
     /// @brief Count of dropped MonitorResult event posts.
     [[nodiscard]] std::uint32_t DroppedResultEvents() const noexcept { return dropped_result_events_; }
     /// @brief Count of dropped FailureResult event posts.
@@ -249,6 +329,8 @@ public:
     [[nodiscard]] std::uint32_t PendingAeEvents() const noexcept { return pending_ae_events_; }
     /// @brief FreeRTOS task entry point (called once, loops internally).
     void TaskLoop() noexcept;
+    /// @brief FreeRTOS AE spectral task entry point (called once, loops internally).
+    void AeSpectralTaskLoop() noexcept;
 
     /// @brief Set calibration biases and persist to NVS.
     /// @param biases Per-axis accel/gyro bias values.
@@ -368,6 +450,8 @@ private:
 
     void CheckFailureEvents() noexcept;
     void PublishFailure(FailureEvent event) noexcept;
+    [[nodiscard]] bool InitAeSpectralAdc() noexcept;
+    void ProcessAeSpectralWindow() noexcept;
     static void AeGpioIsr(void* arg) noexcept;
     [[nodiscard]] std::size_t BufferSize() const noexcept;
     [[nodiscard]] std::size_t StartIndex() const noexcept;
@@ -381,6 +465,7 @@ private:
 
     mutable std::mutex mutex_;
     TaskHandle_t task_handle_{nullptr};
+    TaskHandle_t ae_spectral_task_handle_{nullptr};
 
     std::array<float, kStorageSamples> roll_history_{};
     std::array<float, kStorageSamples> pitch_history_{};
@@ -423,6 +508,12 @@ private:
 
     void* adc_handle_{nullptr};
     bool adc_initialized_{false};
+    AeSpectralDetector ae_spectral_detector_{};
+    std::array<std::uint16_t, kAeSpectralMaxWindowSamples> ae_sample_window_{};
+    std::array<float, kAeSpectralMaxWindowSamples * 2U> ae_fft_buffer_{};
+    std::array<std::uint8_t, 256U> ae_adc_read_buffer_{};
+    std::size_t ae_sample_count_{0U};
+    std::uint32_t ae_spectral_windows_{0U};
     portMUX_TYPE ae_mux_ = portMUX_INITIALIZER_UNLOCKED;
     std::uint32_t pending_ae_events_{0U};
     std::uint32_t dropped_result_events_{0U};

@@ -26,6 +26,9 @@ config MONITOR_AE_MODE_GPIO
 config MONITOR_AE_MODE_ADC
     bool "ADC threshold (analog)"
 
+config MONITOR_AE_MODE_SPECTRAL_ADC
+    bool "ADC spectral detector (analog)"
+
 endchoice
 
 config MONITOR_AE_ADC_THRESHOLD
@@ -34,6 +37,83 @@ config MONITOR_AE_ADC_THRESHOLD
     range 0 4095
     help
         Raw ADC threshold for acoustic emission failure.
+
+config MONITOR_AE_SPECTRAL_SAMPLE_RATE_HZ
+    int "AE spectral ADC sample rate (Hz)"
+    default 40000
+    range 1000 80000
+    help
+        Continuous ADC sampling rate for spectral acoustic emission detection.
+
+config MONITOR_AE_SPECTRAL_WINDOW_SIZE
+    int "AE spectral FFT window samples"
+    default 256
+    range 64 1024
+    help
+        FFT window length. Must be a power of two.
+
+config MONITOR_AE_SPECTRAL_BIN_START
+    int "AE spectral first energy bin"
+    default 64
+    range 1 511
+    help
+        Inclusive positive-frequency FFT bin where high-frequency energy starts.
+
+config MONITOR_AE_SPECTRAL_BIN_END
+    int "AE spectral last energy bin"
+    default 127
+    range 1 511
+    help
+        Inclusive positive-frequency FFT bin where high-frequency energy ends.
+
+config MONITOR_AE_SPECTRAL_LEAK_ALPHA_X100
+    int "AE spectral leak alpha (x100)"
+    default 95
+    range 0 100
+    help
+        Leaking integrator alpha. Default 95 means 0.95.
+
+config MONITOR_AE_SPECTRAL_EWMA_ALPHA_X100
+    int "AE spectral EWMA alpha (x100)"
+    default 5
+    range 1 100
+    help
+        EWMA baseline alpha. Default 5 means 0.05.
+
+config MONITOR_AE_SPECTRAL_DANGER_MULTIPLIER_X10
+    int "AE spectral danger multiplier (x10)"
+    default 60
+    range 1 1000
+    help
+        Dynamic danger threshold multiplier. Default 60 means 6.0.
+
+config MONITOR_AE_SPECTRAL_GRADIENT_WINDOW
+    int "AE spectral gradient window"
+    default 20
+    range 2 256
+    help
+        Number of integrator samples used for gradient comparison.
+
+config MONITOR_AE_SPECTRAL_JUMP_THRESHOLD_X10
+    int "AE spectral jump threshold (x10)"
+    default 64
+    range 0 100000
+    help
+        Energy jump latch threshold. Default 64 means 6.4.
+
+config MONITOR_AE_SPECTRAL_LATCH_DURATION_MS
+    int "AE spectral latch duration (ms)"
+    default 2000
+    range 1 60000
+    help
+        Duration to hold energy-jump latch active after sudden high-frequency energy increase.
+
+config MONITOR_AE_SPECTRAL_MIN_PUBLISH_INTERVAL_MS
+    int "AE spectral minimum publish interval (ms)"
+    default 2000
+    range 0 60000
+    help
+        Minimum interval for repeated acoustic emission publishes while spectral conditions stay active.
 
 config MONITOR_PEAK_MIN_AMPLITUDE_X10
     int "Peak detection min amplitude (deg x10)"

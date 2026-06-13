@@ -236,7 +236,7 @@ extern "C" void app_main(void) {
 
     monitor::MonitorConfig monitor_cfg{};
     monitor_cfg.ae_gpio_pin = static_cast<std::int32_t>(pins::AE_GPIO_PIN);
-    monitor_cfg.ae_adc_channel = static_cast<std::int32_t>(ADC_CHANNEL_3);
+    monitor_cfg.ae_adc_channel = static_cast<std::int32_t>(ADC_CHANNEL_0);
 
     static monitor::Monitor monitor{imu_cfg, monitor_cfg};
     if (!monitor.Init()) {
@@ -316,7 +316,10 @@ extern "C" void app_main(void) {
 
 #if CONFIG_APP_VERIFY_ENABLE
     ESP_LOGI(kVerifyTag, "Verification start");
-    verify::LogRuntimeDiagnostics("startup", monitor.GetTaskHandle(), logger.GetTaskHandle());
+    verify::LogRuntimeDiagnostics("startup",
+                                  monitor.GetTaskHandle(),
+                                  logger.GetTaskHandle(),
+                                  monitor.GetAeSpectralTaskHandle());
 
     sensor::lsm6ds3::Value gyro{};
     sensor::lsm6ds3::Value accel{};
@@ -333,7 +336,10 @@ extern "C" void app_main(void) {
     static_cast<void>(verify::VerifyMqtt(logger));
 
     static_cast<void>(verify::VerifyMonitorOutput(logger));
-    verify::LogRuntimeDiagnostics("post-verify", monitor.GetTaskHandle(), logger.GetTaskHandle());
+    verify::LogRuntimeDiagnostics("post-verify",
+                                  monitor.GetTaskHandle(),
+                                  logger.GetTaskHandle(),
+                                  monitor.GetAeSpectralTaskHandle());
     ESP_LOGI(kVerifyTag,
              "backpressure monitor_result_drop=%lu monitor_failure_drop=%lu logger_drop=%lu logger_param_drop=%lu logger_failure_drop=%lu",
              static_cast<unsigned long>(monitor.DroppedResultEvents()),

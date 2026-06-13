@@ -387,6 +387,137 @@ TEST_CASE("raw_log_7 reduced replay enters disturbance after calibrated gyro spi
     TEST_ASSERT_TRUE(entered);
 }
 
+TEST_CASE("ae spectral energy sums configured complex FFT bins", "[monitor][ae][spectral]") {
+    std::array<float, monitor::kAeSpectralMaxWindowSamples * 2U> fft{};
+
+    fft[2U * 63U] = 9000.0f;
+    fft[(2U * 64U)] = 3000.0f;
+    fft[(2U * 64U) + 1U] = 4000.0f;
+    fft[(2U * 127U) + 1U] = 2000.0f;
+
+    const float energy = monitor::AeSpectralDetector::ComputeEnergyFromComplexBins(
+        fft.data(),
+        256U,
+        64U,
+        127U);
+
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 7.0f, energy);
+}
+
+TEST_CASE("ae spectral window FFT returns high-bin energy for synthetic signal", "[monitor][ae][spectral]") {
+    monitor::MonitorConfig config{};
+    config.spectral_window_size = 256U;
+    config.spectral_bin_start = 64U;
+    config.spectral_bin_end = 127U;
+
+    TEST_ASSERT_EQUAL(ESP_OK, dsps_fft2r_init_fc32(nullptr, static_cast<int>(config.spectral_window_size)));
+
+    std::array<std::uint16_t, monitor::kAeSpectralMaxWindowSamples> samples{};
+    std::array<float, monitor::kAeSpectralMaxWindowSamples * 2U> fft{};
+    constexpr float kCenter = 2048.0f;
+    constexpr float kAmp = 800.0f;
+    constexpr float kBin = 80.0f;
+    for (std::size_t i = 0U; i < config.spectral_window_size; ++i) {
+        const float phase = 2.0f * 3.14159265358979323846f * kBin *
+            static_cast<float>(i) / static_cast<float>(config.spectral_window_size);
+        samples[i] = static_cast<std::uint16_t>(kCenter + (kAmp * std::sin(phase)));
+    }
+
+    float energy = 0.0f;
+    TEST_ASSERT_TRUE(monitor::AeSpectralDetector::ComputeWindowEnergy(samples.data(),
+                                                                      config,
+                                                                      fft.data(),
+                                                                      fft.size(),
+                                                                      energy));
+    TEST_ASSERT_TRUE(energy > 1.0f);
+}
+
+TEST_CASE("ae spectral energy jump latch activates and expires", "[monitor][ae][spectral]") {
+    monitor::MonitorConfig config{};
+    config.spectral_jump_threshold = 6.4f;
+    config.spectral_latch_duration_ms = 2000U;
+    config.spectral_min_publish_interval_ms = 2000U;
+
+    monitor::AeSpectralDetector detector{};
+    auto result = detector.UpdateEnergy(1.0f, 0U, config);
+    TEST_ASSERT_FALSE(result.should_publish);
+    TEST_ASSERT_FALSE(result.latch_active);
+
+    result = detector.UpdateEnergy(8.0f, 100U, config);
+    TEST_ASSERT_TRUE(result.latch_started);
+    TEST_ASSERT_TRUE(result.latch_active);
+    TEST_ASSERT_TRUE(result.should_publish);
+
+    result = detector.UpdateEnergy(8.1f, 1000U, config);
+    TEST_ASSERT_TRUE(result.latch_active);
+    TEST_ASSERT_FALSE(result.should_publish);
+
+    result = detector.UpdateEnergy(8.1f, 2201U, config);
+    TEST_ASSERT_FALSE(result.latch_active);
+}
+
+TEST_CASE("ae spectral adaptive gradient gates baseline and detects danger", "[monitor][ae][spectral]") {
+    monitor::MonitorConfig config{};
+    config.spectral_leak_alpha = 0.0f;
+    config.spectral_ewma_alpha = 0.5f;
+    config.spectral_danger_multiplier = 6.0f;
+    config.spectral_gradient_window = 3U;
+    config.spectral_jump_threshold = 1000.0f;
+
+    monitor::AeSpectralDetector detector{};
+    auto result = detector.UpdateEnergy(1.0f, 0U, config);
+    result = detector.UpdateEnergy(1.0f, 10U, config);
+    result = detector.UpdateEnergy(1.0f, 20U, config);
+    TEST_ASSERT_FALSE(result.danger_active);
+
+    result = detector.UpdateEnergy(1.0f, 30U, config);
+    TEST_ASSERT_FALSE(result.danger_active);
+    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.1f, result.sigma);
+
+    result = detector.UpdateEnergy(10.0f, 40U, config);
+    TEST_ASSERT_TRUE(result.danger_started);
+    TEST_ASSERT_TRUE(result.should_publish);
+    TEST_ASSERT_TRUE(result.gradient > result.danger_threshold);
+}
+
+TEST_CASE("ae spectral active condition suppresses repeats until publish interval", "[monitor][ae][spectral]") {
+    monitor::MonitorConfig config{};
+    config.spectral_jump_threshold = 1.0f;
+    config.spectral_latch_duration_ms = 5000U;
+    config.spectral_min_publish_interval_ms = 1000U;
+
+    monitor::AeSpectralDetector detector{};
+    auto result = detector.UpdateEnergy(1.0f, 0U, config);
+    TEST_ASSERT_FALSE(result.should_publish);
+
+    result = detector.UpdateEnergy(3.0f, 10U, config);
+    TEST_ASSERT_TRUE(result.should_publish);
+
+    result = detector.UpdateEnergy(3.1f, 100U, config);
+    TEST_ASSERT_TRUE(result.latch_active);
+    TEST_ASSERT_FALSE(result.should_publish);
+
+    result = detector.UpdateEnergy(3.1f, 1200U, config);
+    TEST_ASSERT_TRUE(result.latch_active);
+    TEST_ASSERT_TRUE(result.should_publish);
+}
+
+TEST_CASE("ae spectral config rejects invalid bins and windows", "[monitor][ae][spectral]") {
+    monitor::MonitorConfig config{};
+    TEST_ASSERT_TRUE(monitor::AeSpectralDetector::ValidateConfig(config));
+
+    config.spectral_bin_start = 0U;
+    TEST_ASSERT_FALSE(monitor::AeSpectralDetector::ValidateConfig(config));
+
+    config = monitor::MonitorConfig{};
+    config.spectral_bin_end = config.spectral_window_size / 2U;
+    TEST_ASSERT_FALSE(monitor::AeSpectralDetector::ValidateConfig(config));
+
+    config = monitor::MonitorConfig{};
+    config.spectral_window_size = 250U;
+    TEST_ASSERT_FALSE(monitor::AeSpectralDetector::ValidateConfig(config));
+}
+
 /* --------------------------------------------------------------------------
    6.6 Dominant Axis Peak-to-Peak Tests
    -------------------------------------------------------------------------- */
@@ -523,3 +654,5 @@ TEST_CASE("noise gate passes event with peak_gmag above threshold", "[monitor][n
                      event.damping_confidence[0] == 'm' ||
                      event.damping_confidence[0] == 'l');
 }
+
+} // namespace

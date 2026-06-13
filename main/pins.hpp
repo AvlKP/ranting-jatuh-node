@@ -15,7 +15,7 @@
 /// | SD_DAT0_DO   |  13  | SDIO DAT0 / SPI MISO   |
 /// | SD_DAT3_CS   |  10  | SPI Chip Select        |
 /// | SD_DET       |   9  | Card detect             |
-/// | AE_ADC_PIN   |  14  | ADC1_CH3 analog input   |
+/// | AE_ADC_PIN   |   1  | ADC1_CH0 analog input   |
 /// | AE_GPIO_PIN  |  15  | Digital interrupt input |
 /// | TX_PIN       |  43  | Debug UART TX           |
 /// | RX_PIN       |  44  | Debug UART RX           |
@@ -46,6 +46,6 @@ namespace pins {
   constexpr gpio_num_t SD_DET = GPIO_NUM_9;
   constexpr gpio_num_t SD_BATT = GPIO_NUM_8;
 
-  constexpr gpio_num_t AE_ADC_PIN = GPIO_NUM_14;  // ADC1_CH3
+  constexpr gpio_num_t AE_ADC_PIN = GP1_PIN;  // ADC1_CH0
   constexpr gpio_num_t AE_GPIO_PIN = GPIO_NUM_15;
 }
