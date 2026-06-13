@@ -213,8 +213,8 @@ void AeSpectralDetector::Reset() noexcept {
     has_previous_energy_ = false;
     integrator_ = 0.0f;
     ewma_mean_ = 0.0f;
-    ewma_variance_ = 0.01f;
-    sigma_ = 0.1f;
+    ewma_variance_ = 100.0f;
+    sigma_ = 10.0f;
     latch_until_ms_ = 0U;
     last_publish_ms_ = 0U;
     latch_active_ = false;
@@ -229,7 +229,6 @@ AeSpectralUpdateResult AeSpectralDetector::UpdateEnergy(float energy,
 
     const bool was_latch_active = latch_active_;
     const bool was_danger_active = danger_active_;
-    const bool was_active = was_latch_active || was_danger_active;
 
     if (latch_active_ && (now_ms >= latch_until_ms_)) {
         latch_active_ = false;
@@ -253,6 +252,10 @@ AeSpectralUpdateResult AeSpectralDetector::UpdateEnergy(float energy,
     gradient_ring_[gradient_write_index_] = integrator_;
     gradient_write_index_ = (gradient_write_index_ + 1U) % config.spectral_gradient_window;
 
+    if (gradient < 0.0f) {
+        gradient = 0.0f;
+    }
+
     sigma_ = std::max(0.1f, std::sqrt(std::max(0.0f, ewma_variance_)));
     const float threshold = ewma_mean_ + (config.spectral_danger_multiplier * sigma_);
     danger_active_ = gradient_full && (gradient > threshold);
@@ -262,14 +265,13 @@ AeSpectralUpdateResult AeSpectralDetector::UpdateEnergy(float energy,
         if (z_score <= 3.0f) {
             const float diff = gradient - ewma_mean_;
             ewma_mean_ += config.spectral_ewma_alpha * diff;
-            ewma_variance_ = (1.0f - config.spectral_ewma_alpha) *
-                (ewma_variance_ + (config.spectral_ewma_alpha * diff * diff));
+            ewma_variance_ = (config.spectral_ewma_alpha * diff * diff) +
+                ((1.0f - config.spectral_ewma_alpha) * ewma_variance_);
             sigma_ = std::max(0.1f, std::sqrt(std::max(0.0f, ewma_variance_)));
         }
     }
 
-    const bool active = latch_active_ || danger_active_;
-    const bool interval_due = active &&
+    const bool interval_due = danger_active_ &&
         (config.spectral_min_publish_interval_ms > 0U) &&
         ((last_publish_ms_ == 0U) ||
          ((now_ms - last_publish_ms_) >= static_cast<std::uint64_t>(config.spectral_min_publish_interval_ms)));
@@ -282,7 +284,7 @@ AeSpectralUpdateResult AeSpectralDetector::UpdateEnergy(float energy,
     result.latch_started = !was_latch_active && latch_active_;
     result.danger_active = danger_active_;
     result.danger_started = !was_danger_active && danger_active_;
-    result.should_publish = result.latch_started || result.danger_started || (was_active && interval_due);
+    result.should_publish = result.danger_started || (was_danger_active && interval_due);
     if (result.should_publish) {
         last_publish_ms_ = now_ms;
     }

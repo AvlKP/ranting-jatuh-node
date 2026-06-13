@@ -432,7 +432,7 @@ TEST_CASE("ae spectral window FFT returns high-bin energy for synthetic signal",
     TEST_ASSERT_TRUE(energy > 1.0f);
 }
 
-TEST_CASE("ae spectral energy jump latch activates and expires", "[monitor][ae][spectral]") {
+TEST_CASE("ae spectral energy jump latch activates and expires without publishing", "[monitor][ae][spectral]") {
     monitor::MonitorConfig config{};
     config.spectral_jump_threshold = 6.4f;
     config.spectral_latch_duration_ms = 2000U;
@@ -446,7 +446,7 @@ TEST_CASE("ae spectral energy jump latch activates and expires", "[monitor][ae][
     result = detector.UpdateEnergy(8.0f, 100U, config);
     TEST_ASSERT_TRUE(result.latch_started);
     TEST_ASSERT_TRUE(result.latch_active);
-    TEST_ASSERT_TRUE(result.should_publish);
+    TEST_ASSERT_FALSE(result.should_publish);
 
     result = detector.UpdateEnergy(8.1f, 1000U, config);
     TEST_ASSERT_TRUE(result.latch_active);
@@ -472,34 +472,71 @@ TEST_CASE("ae spectral adaptive gradient gates baseline and detects danger", "[m
 
     result = detector.UpdateEnergy(1.0f, 30U, config);
     TEST_ASSERT_FALSE(result.danger_active);
-    TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.1f, result.sigma);
+    TEST_ASSERT_GT_FLOAT(result.sigma, 3.0f);
 
-    result = detector.UpdateEnergy(10.0f, 40U, config);
+    for (int i = 0; i < 16; ++i) {
+        result = detector.UpdateEnergy(1.0f, 40U + static_cast<std::uint64_t>(i * 10U), config);
+    }
+    TEST_ASSERT_FALSE(result.danger_active);
+    TEST_ASSERT_LT_FLOAT(result.sigma, 1.0f);
+
+    result = detector.UpdateEnergy(10.0f, 220U, config);
     TEST_ASSERT_TRUE(result.danger_started);
     TEST_ASSERT_TRUE(result.should_publish);
     TEST_ASSERT_TRUE(result.gradient > result.danger_threshold);
 }
 
-TEST_CASE("ae spectral active condition suppresses repeats until publish interval", "[monitor][ae][spectral]") {
+TEST_CASE("ae spectral danger active condition suppresses repeats until publish interval", "[monitor][ae][spectral]") {
     monitor::MonitorConfig config{};
-    config.spectral_jump_threshold = 1.0f;
-    config.spectral_latch_duration_ms = 5000U;
+    config.spectral_jump_threshold = 1000.0f;
+    config.spectral_leak_alpha = 0.0f;
+    config.spectral_ewma_alpha = 0.5f;
+    config.spectral_danger_multiplier = 6.0f;
+    config.spectral_gradient_window = 3U;
     config.spectral_min_publish_interval_ms = 1000U;
 
     monitor::AeSpectralDetector detector{};
     auto result = detector.UpdateEnergy(1.0f, 0U, config);
     TEST_ASSERT_FALSE(result.should_publish);
 
-    result = detector.UpdateEnergy(3.0f, 10U, config);
+    result = detector.UpdateEnergy(1.0f, 10U, config);
+    result = detector.UpdateEnergy(1.0f, 20U, config);
+    for (int i = 0; i < 16; ++i) {
+        result = detector.UpdateEnergy(1.0f, 30U + static_cast<std::uint64_t>(i * 10U), config);
+    }
+    TEST_ASSERT_FALSE(result.danger_active);
+    TEST_ASSERT_LT_FLOAT(result.sigma, 0.5f);
+
+    result = detector.UpdateEnergy(3.0f, 200U, config);
+    TEST_ASSERT_TRUE(result.danger_started);
     TEST_ASSERT_TRUE(result.should_publish);
 
-    result = detector.UpdateEnergy(3.1f, 100U, config);
-    TEST_ASSERT_TRUE(result.latch_active);
+    result = detector.UpdateEnergy(3.0f, 300U, config);
+    TEST_ASSERT_TRUE(result.danger_active);
     TEST_ASSERT_FALSE(result.should_publish);
 
-    result = detector.UpdateEnergy(3.1f, 1200U, config);
-    TEST_ASSERT_TRUE(result.latch_active);
+    result = detector.UpdateEnergy(3.0f, 1300U, config);
+    TEST_ASSERT_TRUE(result.danger_active);
     TEST_ASSERT_TRUE(result.should_publish);
+}
+
+TEST_CASE("ae spectral gradient clamps to zero when integrator decreases", "[monitor][ae][spectral]") {
+    monitor::MonitorConfig config{};
+    config.spectral_leak_alpha = 0.0f;
+    config.spectral_ewma_alpha = 0.5f;
+    config.spectral_danger_multiplier = 6.0f;
+    config.spectral_gradient_window = 3U;
+    config.spectral_jump_threshold = 1000.0f;
+
+    monitor::AeSpectralDetector detector{};
+    detector.UpdateEnergy(10.0f, 0U, config);
+    detector.UpdateEnergy(10.0f, 10U, config);
+    detector.UpdateEnergy(10.0f, 20U, config);
+
+    auto result = detector.UpdateEnergy(1.0f, 30U, config);
+    TEST_ASSERT_GT_FLOAT(0.001f, result.gradient);
+    TEST_ASSERT_FALSE(result.danger_active);
+    TEST_ASSERT_FALSE(result.should_publish);
 }
 
 TEST_CASE("ae spectral config rejects invalid bins and windows", "[monitor][ae][spectral]") {
