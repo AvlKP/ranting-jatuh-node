@@ -322,7 +322,7 @@ TEST_CASE("disturbance copies calibrated short-buffer axes into event storage", 
     monitor.PushSample(2.0f, -2.0f, 2.1f, 2.2f, 2.3f, 2.4f, 2.5f, 2.6f, 3.8f, 0.0f);
 
     TEST_ASSERT_EQUAL_UINT8(static_cast<std::uint8_t>(monitor::NodeState::DISTURBED),
-                            static_cast<std::uint8_t>(monitor.state_));
+                            static_cast<std::uint8_t>(monitor.state_.load()));
     TEST_ASSERT_TRUE(monitor.sample_count_ >= 2U);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 0.1f, monitor.gx_history_[0U]);
     TEST_ASSERT_FLOAT_WITHIN(0.001f, 2.2f, monitor.gy_history_[1U]);

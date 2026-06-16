@@ -10,6 +10,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
@@ -273,6 +274,9 @@ private:
 /// 3. On DISTURBED→IDLE: TKEO decay onset → dominant axis FFT → peak-hold
 ///    envelope → OLS log-fit damping → publish MonitorResult
 ///
+/// All internal buffers are statically-sized; no dynamic allocation is
+/// performed after construction.
+///
 /// @see imu_algorithms/_extraction.py::Pipeline
 class Monitor {
 public:
@@ -316,17 +320,17 @@ public:
     /// @param max_len Maximum samples to copy.
     void GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, std::size_t max_len) const noexcept;
     /// @brief Current disturbance state (IDLE or DISTURBED).
-    [[nodiscard]] NodeState GetState() const noexcept { return state_; }
+    [[nodiscard]] NodeState GetState() const noexcept { return state_.load(); }
     /// @brief FreeRTOS task handle of the monitor task.
     [[nodiscard]] TaskHandle_t GetTaskHandle() const noexcept { return task_handle_; }
     /// @brief FreeRTOS task handle of the AE spectral task when spectral mode is enabled.
     [[nodiscard]] TaskHandle_t GetAeSpectralTaskHandle() const noexcept { return ae_spectral_task_handle_; }
     /// @brief Count of dropped MonitorResult event posts.
-    [[nodiscard]] std::uint32_t DroppedResultEvents() const noexcept { return dropped_result_events_; }
+    [[nodiscard]] std::uint32_t DroppedResultEvents() const noexcept { return dropped_result_events_.load(); }
     /// @brief Count of dropped FailureResult event posts.
-    [[nodiscard]] std::uint32_t DroppedFailureEvents() const noexcept { return dropped_failure_events_; }
+    [[nodiscard]] std::uint32_t DroppedFailureEvents() const noexcept { return dropped_failure_events_.load(); }
     /// @brief Count of pending acoustic emission events.
-    [[nodiscard]] std::uint32_t PendingAeEvents() const noexcept { return pending_ae_events_; }
+    [[nodiscard]] std::uint32_t PendingAeEvents() const noexcept;
     /// @brief FreeRTOS task entry point (called once, loops internally).
     void TaskLoop() noexcept;
     /// @brief FreeRTOS AE spectral task entry point (called once, loops internally).
@@ -449,6 +453,7 @@ private:
                               const char* src) noexcept;
 
     void CheckFailureEvents() noexcept;
+    void CheckAeFailureEvents() noexcept;
     void PublishFailure(FailureEvent event) noexcept;
     [[nodiscard]] bool InitAeSpectralAdc() noexcept;
     void ProcessAeSpectralWindow() noexcept;
@@ -496,10 +501,9 @@ private:
     TkeoWindow tkeo_window_{};
     DspDisturbanceDetector dsp_detector_{};
 
-
-    NodeState state_{NodeState::IDLE};
-
     float peak_gmag_{0.0f};
+
+    std::atomic<NodeState> state_{NodeState::IDLE};
 
     std::array<float, kFftWindowSamples * 2U> fft_input_{};
     std::array<float, kFftWindowSamples / 2U> psd_accum_{};
@@ -514,10 +518,10 @@ private:
     std::array<std::uint8_t, 256U> ae_adc_read_buffer_{};
     std::size_t ae_sample_count_{0U};
     std::uint32_t ae_spectral_windows_{0U};
-    portMUX_TYPE ae_mux_ = portMUX_INITIALIZER_UNLOCKED;
+    mutable portMUX_TYPE ae_mux_ = portMUX_INITIALIZER_UNLOCKED;
     std::uint32_t pending_ae_events_{0U};
-    std::uint32_t dropped_result_events_{0U};
-    std::uint32_t dropped_failure_events_{0U};
+    std::atomic<std::uint32_t> dropped_result_events_{0U};
+    std::atomic<std::uint32_t> dropped_failure_events_{0U};
 
     static constexpr std::size_t kMaxStreamSamples = 20U;
     std::array<StreamSample, kMaxStreamSamples> stream_samples_{};
