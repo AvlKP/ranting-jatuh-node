@@ -8,7 +8,8 @@
 
 #pragma once
 
-#include <functional>
+#include <cstddef>
+#include <cstdint>
 #include "lsm6ds3_detail.hpp"
 
 namespace sensor {
@@ -17,9 +18,11 @@ namespace sensor {
 class Lsm6ds3 {
 public:
     /// @brief Callback: read from a sensor register via I2C.
-    using ReadRegCb = std::function<bool(uint8_t reg, uint8_t* data, size_t len)>;
+    /// Heap-free function pointer; no std::function indirection in the sample hot path.
+    using ReadRegCb = bool(*)(uint8_t reg, uint8_t* data, size_t len);
     /// @brief Callback: write to a sensor register via I2C.
-    using WriteRegCb = std::function<bool(uint8_t reg, const uint8_t* data, size_t len)>;
+    /// Heap-free function pointer; no std::function indirection in the sample hot path.
+    using WriteRegCb = bool(*)(uint8_t reg, const uint8_t* data, size_t len);
 
     /// @brief Driver configuration binding sensor settings to I2C transport.
     struct Config {
@@ -36,7 +39,7 @@ public:
         bool fifo_ovr{false};
         bool fifo_full{false};
         bool step_detector{false};
-        
+
         bool tilt{false};
         bool wakeup{false};
         bool free_fall{false};
@@ -54,7 +57,7 @@ public:
         bool fifo_th{false};        ///< FIFO watermark threshold.
         bool step_count_ov{false};  ///< Step counter overflow.
         bool step_delta{false};     ///< Step delta event.
-        
+
         bool tilt{false};           ///< Tilt event.
         bool wakeup{false};         ///< Wake-up event.
         bool free_fall{false};      ///< Free-fall event.

@@ -34,6 +34,8 @@ constexpr std::uint32_t kNtpSyncTimeoutMs = 15000U;
 constexpr std::uint32_t kMinValidEpoch = 1672531200U;
 constexpr EventBits_t kMqttConnectedBit = BIT0;
 constexpr std::size_t kTaskStackSize = 6144U;
+constexpr std::uint64_t kParameterPeriodUs =
+    static_cast<std::uint64_t>(CONFIG_LOGGER_WIFI_PERIOD_HOURS) * 60ULL * 1000000ULL;
 constexpr UBaseType_t kTaskPriority = 3U;
 constexpr BaseType_t kTaskCore = 0;
 
@@ -47,6 +49,11 @@ EventGroupHandle_t s_mqtt_event_group = nullptr;
 esp_mqtt_client_handle_t s_client = nullptr;
 esp_mqtt5_connection_property_config_t s_connect_property{};
 esp_mqtt5_publish_property_config_t s_publish_property{};
+outbox::FileEntry s_pending_entries[outbox::kMaxPendingFiles]{};
+outbox::FileEntry s_publish_entries[outbox::kMaxPendingFiles]{};
+char s_pending_path[outbox::kPathMax]{};
+char s_line_buf[512]{};
+std::uint64_t s_last_parameter_publish_us{0U};
 
 // ============================================================================
 // Backoff State
@@ -85,6 +92,82 @@ struct BackoffState {
 };
 
 BackoffState s_backoff{};
+
+void LogStackHighWater(const char* stage) {
+    const UBaseType_t words = uxTaskGetStackHighWaterMark(nullptr);
+    const std::uint32_t bytes = static_cast<std::uint32_t>(words) * sizeof(StackType_t);
+    ESP_LOGI(kTag, "network_task stack_high_water stage=%s bytes=%lu",
+             stage,
+             static_cast<unsigned long>(bytes));
+}
+
+bool ParameterCadenceDue(std::uint64_t now_us) {
+    if (kParameterPeriodUs == 0U) {
+        return true;
+    }
+    if (s_last_parameter_publish_us == 0U) {
+        s_last_parameter_publish_us = now_us;
+        return false;
+    }
+    return (now_us - s_last_parameter_publish_us) >= kParameterPeriodUs;
+}
+
+std::size_t SelectPublishEntries(const outbox::FileEntry* entries,
+                                 std::size_t file_count,
+                                 bool params_due,
+                                 bool& out_has_failure,
+                                 bool& out_has_params) {
+    out_has_failure = false;
+    out_has_params = false;
+    std::size_t publish_count = 0U;
+
+    for (std::size_t i = 0U; i < file_count && publish_count < outbox::kMaxPendingFiles; ++i) {
+        if (entries[i].is_failure) {
+            out_has_failure = true;
+            s_publish_entries[publish_count] = entries[i];
+            ++publish_count;
+        } else {
+            out_has_params = true;
+            if (params_due) {
+                s_publish_entries[publish_count] = entries[i];
+                ++publish_count;
+            }
+        }
+    }
+
+    return publish_count;
+}
+
+std::size_t SelectPublishEntriesToBuffer(const outbox::FileEntry* entries,
+                                         std::size_t file_count,
+                                         bool params_due,
+                                         outbox::FileEntry* out_entries,
+                                         std::size_t out_capacity,
+                                         bool& out_has_failure,
+                                         bool& out_has_params) {
+    out_has_failure = false;
+    out_has_params = false;
+    std::size_t publish_count = 0U;
+    if (entries == nullptr || out_entries == nullptr) {
+        return 0U;
+    }
+
+    for (std::size_t i = 0U; i < file_count && publish_count < out_capacity; ++i) {
+        if (entries[i].is_failure) {
+            out_has_failure = true;
+            out_entries[publish_count] = entries[i];
+            ++publish_count;
+        } else {
+            out_has_params = true;
+            if (params_due) {
+                out_entries[publish_count] = entries[i];
+                ++publish_count;
+            }
+        }
+    }
+
+    return publish_count;
+}
 
 // ============================================================================
 // MQTT Event Handler
@@ -241,33 +324,31 @@ bool PublishLine(const char* topic, const char* line, std::size_t len, const cha
 // ============================================================================
 
 bool ProcessFile(const outbox::FileEntry& entry) {
-    char path[outbox::kPathMax]{};
-    const int path_len = std::snprintf(path, sizeof(path),
+    const int path_len = std::snprintf(s_pending_path, sizeof(s_pending_path),
                                         "%s/outbox/pending/%s",
                                         s_mount_point,
                                         entry.filename.data());
-    if (path_len <= 0 || static_cast<std::size_t>(path_len) >= sizeof(path)) {
+    if (path_len <= 0 || static_cast<std::size_t>(path_len) >= sizeof(s_pending_path)) {
         return false;
     }
 
-    FILE* file = std::fopen(path, "r");
+    FILE* file = std::fopen(s_pending_path, "r");
     if (file == nullptr) {
-        ESP_LOGW(kTag, "Open pending file failed: %s", path);
+        ESP_LOGW(kTag, "Open pending file failed: %s", s_pending_path);
         return false;
     }
 
     bool all_ok = true;
-    char line_buf[1024]{};
     const char* content_type = entry.is_failure ? "application/json" : "application/json";
     const char* datatype = entry.is_failure ? "failures" : "parameters";
     const char* topic = mqtt::GetTopic(datatype);
 
-    while (std::fgets(line_buf, static_cast<int>(sizeof(line_buf)), file) != nullptr) {
-        const std::size_t len = std::strlen(line_buf);
+    while (std::fgets(s_line_buf, static_cast<int>(sizeof(s_line_buf)), file) != nullptr) {
+        const std::size_t len = std::strlen(s_line_buf);
         if (len == 0U) {
             continue;
         }
-        if (!PublishLine(topic, line_buf, len, content_type)) {
+        if (!PublishLine(topic, s_line_buf, len, content_type)) {
             all_ok = false;
             ESP_LOGW(kTag, "Failed to publish line from %s", entry.filename.data());
         }
@@ -283,32 +364,54 @@ bool ProcessFile(const outbox::FileEntry& entry) {
 
 void TaskLoop(void*) {
     ESP_LOGI(kTag, "Network task started");
+    s_last_parameter_publish_us = static_cast<std::uint64_t>(esp_timer_get_time());
+    LogStackHighWater("start");
 
     while (true) {
         // wait for notification or timeout (for periodic scan)
         const std::uint32_t notified = ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(1000));
         static_cast<void>(notified);
 
-        outbox::FileEntry entries[outbox::kMaxPendingFiles]{};
         std::size_t file_count = 0U;
+        const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
+        const bool params_due = ParameterCadenceDue(now_us);
+        if (params_due && !outbox::SealParameterFile()) {
+            ESP_LOGW(kTag, "Parameter seal failed");
+        }
 
-        if (!outbox::GetPendingFiles(entries, file_count) || file_count == 0U) {
+        if (!outbox::GetPendingFiles(s_pending_entries, file_count) || file_count == 0U) {
+            continue;
+        }
+
+        bool has_failure = false;
+        bool has_params = false;
+        const std::size_t publish_count = SelectPublishEntries(s_pending_entries,
+                                                               file_count,
+                                                               params_due,
+                                                               has_failure,
+                                                               has_params);
+        if (publish_count == 0U) {
+            ESP_LOGD(kTag, "Skipping publish: params_due=%d has_params=%d has_failure=%d",
+                     params_due ? 1 : 0,
+                     has_params ? 1 : 0,
+                     has_failure ? 1 : 0);
             continue;
         }
 
         // check backoff
-        const std::uint64_t now_us = static_cast<std::uint64_t>(esp_timer_get_time());
         if (s_backoff.ShouldSkip(now_us)) {
             ESP_LOGD(kTag, "Skipping publish — in backoff period");
             continue;
         }
 
         // connect WiFi
+        LogStackHighWater("pre_connect");
         if (!network::EnsureConnected()) {
             ESP_LOGE(kTag, "WiFi connect failed");
             s_backoff.OnFailure(static_cast<std::uint64_t>(esp_timer_get_time()));
             continue;
         }
+        LogStackHighWater("post_connect");
 
         // sync NTP after WiFi connect
         SyncTime();
@@ -345,31 +448,44 @@ void TaskLoop(void*) {
 
         // publish all pending files
         bool all_success = true;
-        for (std::size_t i = 0U; i < file_count; ++i) {
-            ESP_LOGI(kTag, "Publishing: %s", entries[i].filename.data());
-            if (ProcessFile(entries[i])) {
-                static_cast<void>(outbox::MarkSent(entries[i].filename.data()));
+        bool published_params = false;
+        LogStackHighWater("pre_publish_batch");
+        for (std::size_t i = 0U; i < publish_count; ++i) {
+            ESP_LOGI(kTag, "Publishing: %s", s_publish_entries[i].filename.data());
+            if (ProcessFile(s_publish_entries[i])) {
+                if (!outbox::MarkSent(s_publish_entries[i].filename.data())) {
+                    all_success = false;
+                    ESP_LOGW(kTag, "MarkSent failed for %s", s_publish_entries[i].filename.data());
+                } else if (!s_publish_entries[i].is_failure) {
+                    published_params = true;
+                }
             } else {
                 all_success = false;
             }
         }
+        LogStackHighWater("post_publish_batch");
 
         // stop MQTT client
         esp_mqtt_client_stop(s_client);
 
         // update backoff
-        if (all_success && file_count > 0U) {
+        if (all_success && publish_count > 0U) {
             s_backoff.OnSuccess();
-            ESP_LOGI(kTag, "Publish batch succeeded. Files: %u", static_cast<unsigned>(file_count));
+            if (published_params) {
+                s_last_parameter_publish_us = static_cast<std::uint64_t>(esp_timer_get_time());
+            }
+            ESP_LOGI(kTag, "Publish batch succeeded. Files: %u", static_cast<unsigned>(publish_count));
         } else {
             s_backoff.OnFailure(static_cast<std::uint64_t>(esp_timer_get_time()));
         }
 
         // prune sent directory
+        LogStackHighWater("pre_cleanup");
         static_cast<void>(outbox::PruneSent(10U));
 
         // release WiFi connection
         network::ReleaseConnection();
+        LogStackHighWater("post_cleanup");
 
         ESP_LOGI(kTag, "Publish cycle complete");
     }
@@ -418,6 +534,22 @@ void EnqueueNotify() noexcept {
     if (s_task_handle != nullptr) {
         xTaskNotifyGive(s_task_handle);
     }
+}
+
+std::size_t SelectPublishEntriesForTest(const outbox::FileEntry* entries,
+                                        std::size_t file_count,
+                                        bool params_due,
+                                        outbox::FileEntry* out_entries,
+                                        std::size_t out_capacity) noexcept {
+    bool has_failure = false;
+    bool has_params = false;
+    return SelectPublishEntriesToBuffer(entries,
+                                        file_count,
+                                        params_due,
+                                        out_entries,
+                                        out_capacity,
+                                        has_failure,
+                                        has_params);
 }
 
 } // namespace logger::network_task

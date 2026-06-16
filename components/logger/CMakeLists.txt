@@ -9,5 +9,5 @@ list(APPEND SRCS "logger_mqtt.cpp")
 
 idf_component_register(SRCS ${SRCS}
                     INCLUDE_DIRS "include"
-                    REQUIRES "monitor" "nvs_flash" "esp_wifi" "esp_event"
+                    REQUIRES "monitor" "runtime" "nvs_flash" "esp_wifi" "esp_event"
                              "esp_netif" "mqtt" "esp_timer" "log" "wpa_supplicant")

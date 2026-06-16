@@ -47,6 +47,7 @@
 #include "network_task.hpp"
 #include "dashboard.hpp"
 #include "verify.hpp"
+#include "nvs_init.hpp"
 
 namespace {
 
@@ -192,6 +193,49 @@ bool InitSdCard() {
     return true;
 }
 
+bool EnsureDefaultCalibrationBiases() {
+    nvs_handle_t handle = 0;
+    esp_err_t err = nvs_open("calib", NVS_READWRITE, &handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(kAppTag, "Calibration NVS open failed: %s", esp_err_to_name(err));
+        return false;
+    }
+
+    calibration::CalibrationBias existing{};
+    std::size_t size = sizeof(existing);
+    err = nvs_get_blob(handle, "imu_bias", &existing, &size);
+    if (err == ESP_OK && size == sizeof(existing)) {
+        ESP_LOGI(kAppTag, "Calibration biases already stored; default write skipped");
+        nvs_close(handle);
+        return true;
+    }
+    if (err != ESP_ERR_NVS_NOT_FOUND) {
+        ESP_LOGE(kAppTag, "Calibration bias read failed: %s", esp_err_to_name(err));
+        nvs_close(handle);
+        return false;
+    }
+
+    calibration::CalibrationBias bias{};
+    bias.ax =  0.014925f;
+    bias.ay = -0.010015f;
+    bias.az =  0.010312f;
+    bias.gx =  1.096412f;
+    bias.gy = -2.593744f;
+    bias.gz =  0.414028f;
+
+    err = calibration::Calibration::WriteBiases(handle, bias);
+    if (err == ESP_OK) {
+        err = nvs_commit(handle);
+    }
+    nvs_close(handle);
+    if (err != ESP_OK) {
+        ESP_LOGE(kAppTag, "Default calibration bias write failed: %s", esp_err_to_name(err));
+        return false;
+    }
+    ESP_LOGI(kAppTag, "Default calibration biases stored");
+    return true;
+}
+
 void LogHeapDiagnostics(const char* stage) {
     const std::uint32_t free_internal = static_cast<std::uint32_t>(heap_caps_get_free_size(MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT));
     const std::uint32_t min_free = static_cast<std::uint32_t>(esp_get_minimum_free_heap_size());
@@ -224,6 +268,15 @@ extern "C" void app_main(void) {
         return;
     }
 
+    if (runtime::EnsureNvsInitialized() != ESP_OK) {
+        ESP_LOGE(kAppTag, "NVS init failed");
+        return;
+    }
+
+    if (!EnsureDefaultCalibrationBiases()) {
+        ESP_LOGW(kAppTag, "Default calibration setup failed, continuing");
+    }
+
     sensor::Lsm6ds3::Config imu_cfg{};
     if (!MapImuOdr(static_cast<std::uint32_t>(CONFIG_MONITOR_IMU_RATE_HZ),
                    imu_cfg.imu_config.accel_odr,
@@ -242,17 +295,6 @@ extern "C" void app_main(void) {
     if (!monitor.Init()) {
         ESP_LOGE(kAppTag, "Monitor init failed");
         return;
-    }
-
-    {
-        calibration::CalibrationBias bias{};
-        bias.ax =  0.014925f;
-        bias.ay = -0.010015f;
-        bias.az =  0.010312f;
-        bias.gx =  1.096412f;
-        bias.gy = -2.593744f;
-        bias.gz =  0.414028f;
-        monitor.SetCalibrationBiases(bias);
     }
 
     if (!InitSdCard()) {

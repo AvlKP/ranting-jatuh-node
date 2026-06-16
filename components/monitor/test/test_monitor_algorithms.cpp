@@ -472,13 +472,13 @@ TEST_CASE("ae spectral adaptive gradient gates baseline and detects danger", "[m
 
     result = detector.UpdateEnergy(1.0f, 30U, config);
     TEST_ASSERT_FALSE(result.danger_active);
-    TEST_ASSERT_GT_FLOAT(result.sigma, 3.0f);
+    TEST_ASSERT_TRUE(result.sigma > 3.0f);
 
     for (int i = 0; i < 16; ++i) {
         result = detector.UpdateEnergy(1.0f, 40U + static_cast<std::uint64_t>(i * 10U), config);
     }
     TEST_ASSERT_FALSE(result.danger_active);
-    TEST_ASSERT_LT_FLOAT(result.sigma, 1.0f);
+    TEST_ASSERT_TRUE(result.sigma < 1.0f);
 
     result = detector.UpdateEnergy(10.0f, 220U, config);
     TEST_ASSERT_TRUE(result.danger_started);
@@ -505,7 +505,7 @@ TEST_CASE("ae spectral danger active condition suppresses repeats until publish 
         result = detector.UpdateEnergy(1.0f, 30U + static_cast<std::uint64_t>(i * 10U), config);
     }
     TEST_ASSERT_FALSE(result.danger_active);
-    TEST_ASSERT_LT_FLOAT(result.sigma, 0.5f);
+    TEST_ASSERT_TRUE(result.sigma < 0.5f);
 
     result = detector.UpdateEnergy(3.0f, 200U, config);
     TEST_ASSERT_TRUE(result.danger_started);
@@ -529,12 +529,12 @@ TEST_CASE("ae spectral gradient clamps to zero when integrator decreases", "[mon
     config.spectral_jump_threshold = 1000.0f;
 
     monitor::AeSpectralDetector detector{};
-    detector.UpdateEnergy(10.0f, 0U, config);
-    detector.UpdateEnergy(10.0f, 10U, config);
-    detector.UpdateEnergy(10.0f, 20U, config);
+    auto result = detector.UpdateEnergy(10.0f, 0U, config);
+    result = detector.UpdateEnergy(10.0f, 10U, config);
+    result = detector.UpdateEnergy(10.0f, 20U, config);
 
-    auto result = detector.UpdateEnergy(1.0f, 30U, config);
-    TEST_ASSERT_GT_FLOAT(0.001f, result.gradient);
+    result = detector.UpdateEnergy(1.0f, 30U, config);
+    TEST_ASSERT_TRUE(result.gradient < 0.001f);
     TEST_ASSERT_FALSE(result.danger_active);
     TEST_ASSERT_FALSE(result.should_publish);
 }

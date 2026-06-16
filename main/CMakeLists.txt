@@ -10,7 +10,7 @@ elseif(CONFIG_APP_BUILD_RAW_LOGGER)
                         REQUIRES ${main_reqs})
 else()
     set(main_srcs "verify.cpp" "main.cpp")
-    set(main_reqs "monitor" "logger" "sdmmc" "fatfs" "driver" "log" "dashboard" "esp_event")
+    set(main_reqs "monitor" "logger" "runtime" "sdmmc" "fatfs" "driver" "log" "dashboard" "esp_event")
     idf_component_register(SRCS ${main_srcs}
                         INCLUDE_DIRS "."
                         REQUIRES ${main_reqs})

@@ -16,10 +16,10 @@
 #include "esp_netif.h"
 #include "esp_wifi.h"
 #include "esp_eap_client.h"
-#include "nvs_flash.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "sdkconfig.h"
+#include "nvs_init.hpp"
 
 namespace logger::network {
 
@@ -37,7 +37,6 @@ EventGroupHandle_t s_wifi_event_group = nullptr;
 bool s_netif_initialized = false;
 bool s_wifi_initialized = false;
 bool s_events_registered = false;
-bool s_nvs_initialized = false;
 std::uint8_t s_last_disconnect_reason = 0U;
 
 const char* WifiReasonString(std::uint8_t reason) {
@@ -100,26 +99,10 @@ void IpEventHandler(void*,
 }
 
 bool InitNvs() {
-    if (s_nvs_initialized) {
-        return true;
-    }
-
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        const esp_err_t erase_err = nvs_flash_erase();
-        if (erase_err != ESP_OK) {
-            ESP_LOGE(kTag, "NVS erase failed: %s", esp_err_to_name(erase_err));
-            return false;
-        }
-        err = nvs_flash_init();
-    }
-
+    const esp_err_t err = runtime::EnsureNvsInitialized();
     if (err != ESP_OK) {
-        ESP_LOGE(kTag, "NVS init failed: %s", esp_err_to_name(err));
         return false;
     }
-
-    s_nvs_initialized = true;
     return true;
 }
 

@@ -17,6 +17,7 @@
 #include "esp_attr.h"
 #include "esp_heap_caps.h"
 #include "soc/soc_caps.h"
+#include "nvs_init.hpp"
 
 #define LOG_LOCAL_LEVEL ESP_LOG_INFO
 #include "esp_log.h"
@@ -371,11 +372,19 @@ bool Monitor::Init() noexcept {
 
 #if CONFIG_MONITOR_IMU_CALIBRATION
     {
+        if (runtime::EnsureNvsInitialized() != ESP_OK) {
+            ESP_LOGE(kTag, "NVS init before calib open failed");
+            return false;
+        }
+        ESP_LOGI(kTag, "Opening NVS namespace calib for imu_bias read");
         esp_err_t nvs_err = nvs_open("calib", NVS_READONLY, &calib_nvs_handle_);
         if (nvs_err == ESP_OK) {
-            calibration::Calibration::ReadBiases(calib_nvs_handle_, calib_bias_);
+            nvs_err = calibration::Calibration::ReadBiases(calib_nvs_handle_, calib_bias_);
+            ESP_LOGI(kTag, "Calibration bias read result: %s", esp_err_to_name(nvs_err));
             nvs_close(calib_nvs_handle_);
             calib_nvs_handle_ = 0;
+        } else {
+            ESP_LOGW(kTag, "Calibration NVS open failed: %s", esp_err_to_name(nvs_err));
         }
     }
 #endif
@@ -1577,12 +1586,21 @@ void Monitor::GetLatestSamples(StreamSample* out_samples, std::size_t& out_len, 
 }
 
 void Monitor::SetCalibrationBiases(const calibration::CalibrationBias& biases) noexcept {
+    if (runtime::EnsureNvsInitialized() != ESP_OK) {
+        ESP_LOGE(kTag, "NVS init before calibration write failed");
+        calib_bias_ = biases;
+        return;
+    }
     nvs_handle_t handle = 0;
     esp_err_t err = nvs_open("calib", NVS_READWRITE, &handle);
     if (err == ESP_OK) {
-        calibration::Calibration::WriteBiases(handle, biases);
+        err = calibration::Calibration::WriteBiases(handle, biases);
+        if (err == ESP_OK) {
+            err = nvs_commit(handle);
+        }
         nvs_close(handle);
     }
+    ESP_LOGI(kTag, "Calibration bias write result: %s", esp_err_to_name(err));
     calib_bias_ = biases;
 }
 

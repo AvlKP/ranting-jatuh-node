@@ -9,6 +9,8 @@
 
 #include <cstddef>
 
+#include "outbox.hpp"
+
 namespace logger::network_task {
 
 /// @brief Initialize the network task context.
@@ -23,5 +25,11 @@ namespace logger::network_task {
 /// @brief Notify the network task that new outbox data is available.
 /// Lightweight — can be called from any task.
 void EnqueueNotify() noexcept;
+
+[[nodiscard]] std::size_t SelectPublishEntriesForTest(const outbox::FileEntry* entries,
+                                                      std::size_t file_count,
+                                                      bool params_due,
+                                                      outbox::FileEntry* out_entries,
+                                                      std::size_t out_capacity) noexcept;
 
 } // namespace logger::network_task

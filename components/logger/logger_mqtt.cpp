@@ -10,18 +10,16 @@
 
 #include "esp_err.h"
 #include "esp_log.h"
-#include "nvs_flash.h"
 #include "esp_random.h"
 #include "sdkconfig.h"
 #include "mqtt_log.hpp"
+#include "nvs_init.hpp"
 
 namespace logger::mqtt {
 
 MqttLogBuffer g_mqtt_log_buffer;
 
 namespace {
-
-static const char* kTag = "LOGGER_MQTT";
 
 constexpr char kTopicBasePrefix[] = "ranting/";
 constexpr char kTopicDelimiter[] = "/";
@@ -58,29 +56,11 @@ static bool s_node_id_resolved = false;
 static char s_topic_buffer[64] = {};
 static char s_last_datatype[32] = {};
 
-bool s_nvs_initialized = false;
-
 bool InitNvs() {
-    if (s_nvs_initialized) {
-        return true;
-    }
-
-    esp_err_t err = nvs_flash_init();
-    if (err == ESP_ERR_NVS_NO_FREE_PAGES || err == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-        const esp_err_t erase_err = nvs_flash_erase();
-        if (erase_err != ESP_OK) {
-            ESP_LOGE(kTag, "NVS erase failed: %s", esp_err_to_name(erase_err));
-            return false;
-        }
-        err = nvs_flash_init();
-    }
-
+    const esp_err_t err = runtime::EnsureNvsInitialized();
     if (err != ESP_OK) {
-        ESP_LOGE(kTag, "NVS init failed: %s", esp_err_to_name(err));
         return false;
     }
-
-    s_nvs_initialized = true;
     return true;
 }
 

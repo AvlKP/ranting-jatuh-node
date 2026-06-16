@@ -2,7 +2,6 @@
 
 ## Purpose
 IMU bias calibration subsystem. Stores static accelerometer and gyroscope biases in NVS and subtracts them from raw samples before feeding the orientation filter.
-
 ## Requirements
 ### Requirement: IMU Bias Subtraction
 The monitor SHALL subtract static accelerometer and gyroscope biases from raw IMU samples before feeding them to the orientation filter, when calibration is enabled.
@@ -46,3 +45,57 @@ Bias subtraction SHALL occur after IMU read and before filter update in the proc
 - **THEN** biases SHALL be subtracted from `accel.x/y/z` and `gyro.x/y/z` in-place or into local copies
 - **THEN** calibrated values SHALL be passed to `filter_.update()`
 - **THEN** raw (uncalibrated) values SHALL be stored in `StreamSample` for dashboard display
+
+### Requirement: NVS SHALL be initialized before calibration access
+The firmware SHALL initialize NVS before any monitor calibration read or write is attempted.
+
+#### Scenario: Monitor init reads calibration
+- **WHEN** `CONFIG_MONITOR_IMU_CALIBRATION` is enabled
+- **AND** `Monitor::Init()` attempts to read calibration biases
+- **THEN** NVS SHALL already be initialized
+- **AND** calibration read SHALL NOT rely on network or logger initialization to initialize NVS first
+
+#### Scenario: Calibration write happens during startup
+- **WHEN** startup code calls the monitor calibration write API
+- **THEN** NVS SHALL already be initialized
+- **AND** the write result SHALL be checked or logged
+
+### Requirement: Calibration writes SHALL commit to NVS
+Calibration bias writes SHALL commit the NVS transaction before reporting success.
+
+#### Scenario: Bias write succeeds
+- **WHEN** calibration biases are written to namespace `calib`, key `imu_bias`
+- **THEN** the system SHALL call `nvs_commit()` before closing the handle
+- **AND** success SHALL be reported only if the blob write and commit both succeed
+
+#### Scenario: Bias write fails
+- **WHEN** `nvs_set_blob()` or `nvs_commit()` fails during calibration write
+- **THEN** the failure SHALL be observable through a return value, diagnostic counter, or log message
+- **AND** the system SHALL NOT report the bias as persistently saved
+
+### Requirement: Calibration read failures SHALL be diagnosed
+Calibration read behavior SHALL distinguish missing bias data from NVS errors.
+
+#### Scenario: Bias key missing
+- **WHEN** NVS is initialized
+- **AND** key `imu_bias` does not exist in namespace `calib`
+- **THEN** calibration biases SHALL default to zero
+- **AND** this condition SHALL NOT be treated as an error
+
+#### Scenario: Bias read fails for non-missing error
+- **WHEN** NVS returns an error other than `ESP_ERR_NVS_NOT_FOUND` while reading calibration biases
+- **THEN** the failure SHALL be logged or counted
+- **AND** the monitor SHALL continue only with an explicit zero-bias fallback or caller-visible initialization failure
+
+### Requirement: Calibration verification SHALL prove NVS order without repeated writes
+Calibration startup verification SHALL show NVS initialization before calibration access and SHALL avoid unnecessary repeated calibration writes during normal boot.
+
+#### Scenario: Calibration read after NVS init
+- **WHEN** firmware boots with IMU calibration enabled
+- **THEN** logs SHALL show NVS initialization before `calib` namespace open or `imu_bias` read
+- **AND** monitor initialization SHALL not depend on logger or network initialization for NVS readiness
+
+#### Scenario: Startup applies existing calibration
+- **WHEN** calibration biases already exist in NVS
+- **THEN** normal startup SHALL read and apply the stored biases
+- **AND** it SHALL NOT rewrite and commit the same hard-coded biases on every boot unless an explicit calibration-update path requested it

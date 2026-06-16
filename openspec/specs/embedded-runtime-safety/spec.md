@@ -189,3 +189,73 @@ High-rate acoustic emission ADC sampling and FFT processing SHALL use bounded ta
 - **AND** verification SHALL record boot logs showing critical tasks started
 - **AND** verification SHALL include runtime evidence that monitor, logger, and AE processing tasks remain alive during spectral detection
 
+### Requirement: Cross-core diagnostics SHALL be concurrency-safe
+Firmware diagnostics exposed across FreeRTOS tasks or ESP32-S3 cores SHALL use atomics, bounded critical sections, or locked snapshot APIs.
+
+#### Scenario: Dashboard reads drop counters while tasks update them
+- **WHEN** the dashboard status handler reads monitor or logger drop counters while monitor, logger, or event-loop tasks update those counters
+- **THEN** the values SHALL be read through a concurrency-safe API
+- **AND** no data race or torn compound snapshot SHALL occur
+
+#### Scenario: Verification reads task state while firmware runs
+- **WHEN** startup verification reads monitor state, task handles, or diagnostic counters
+- **THEN** the values SHALL be read through a concurrency-safe API
+- **AND** the read SHALL NOT block monitor sampling for unbounded time
+
+### Requirement: Firmware test builds SHALL compile before runtime validation
+Relevant Unity test builds SHALL compile before a change is considered ready for hardware validation.
+
+#### Scenario: Monitor test build compiles
+- **WHEN** `idf.py -B build-test -D TEST_COMPONENTS=monitor build` is run
+- **THEN** the build SHALL complete successfully
+- **AND** test code SHALL use assertion macros available in the ESP-IDF Unity version in use
+
+### Requirement: Hot-path callbacks SHALL avoid heap-backed type erasure
+Transport callbacks used by monitor sample reads SHALL avoid heap-backed type erasure and unbounded dispatch overhead.
+
+#### Scenario: IMU sample loop invokes transport callbacks
+- **WHEN** the monitor task reads accelerometer and gyroscope samples from the LSM6DS3 driver
+- **THEN** callback dispatch SHALL use fixed-size function pointers, static adapters, or another heap-free mechanism
+- **AND** the sample path SHALL NOT depend on `std::function` allocation behavior
+
+### Requirement: Init-time heap use SHALL be isolated from realtime paths
+Any unavoidable heap allocation by ESP-IDF services or optional filters SHALL occur only during initialization or non-realtime network/dashboard paths.
+
+#### Scenario: Optional EKF allocation is not in monitor sample path
+- **WHEN** the normal monitor sample loop executes
+- **THEN** it SHALL NOT allocate or free EKF or ESP-DSP objects dynamically
+- **AND** optional heap-backed filters SHALL NOT be instantiated from the per-sample update path
+
+### Requirement: Network runtime verification SHALL prove stack margin
+Hardware verification SHALL include stack evidence for the network task during successful and failed publish cycles.
+
+#### Scenario: Network task publishes several files
+- **WHEN** `network_task` completes a publish cycle that includes MQTT connect, at least two failure files, and at least two sealed parameter files
+- **THEN** no stack overflow or stack canary panic SHALL occur
+- **AND** the log SHALL record stack high-water margin for `network_task`
+
+#### Scenario: Backoff after publish error
+- **WHEN** a publish or sent-transition error causes network backoff
+- **THEN** the task SHALL remain alive
+- **AND** stack diagnostics SHALL still be available after the error path
+
+### Requirement: Changed files SHALL pass whitespace checks
+Implementation changes SHALL pass repository whitespace validation before a change is considered ready for merge.
+
+#### Scenario: Git whitespace check
+- **WHEN** `git diff --check` is run after implementation
+- **THEN** it SHALL report no trailing whitespace, conflict markers, or whitespace errors in changed files
+
+### Requirement: Central NVS initialization SHALL be single-owner
+Normal application startup SHALL initialize NVS through one shared owner before components access persistent storage.
+
+#### Scenario: App startup initializes NVS once
+- **WHEN** `app_main` begins normal firmware startup
+- **THEN** NVS SHALL be initialized before monitor calibration, logger node-id, network strategy, WiFi, or MQTT helpers access NVS
+- **AND** components SHALL NOT independently erase or reinitialize NVS after startup has succeeded
+
+#### Scenario: Compatibility wrapper uses shared initializer
+- **WHEN** an existing component entry point requires NVS for backward compatibility
+- **THEN** it SHALL call a shared idempotent initializer or detect initialized state safely
+- **AND** it SHALL NOT maintain a divergent module-local initialization flag that can become stale
+

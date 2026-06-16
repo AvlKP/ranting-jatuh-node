@@ -22,6 +22,19 @@ struct FileEntry {
     bool is_failure{false};
 };
 
+[[nodiscard]] bool ClassifyPendingFilenameForUpload(const char* filename,
+                                                    bool& out_is_failure) noexcept;
+[[nodiscard]] bool FormatUploadFilenameForTest(const char* prefix,
+                                               std::uint32_t epoch,
+                                               std::uint32_t boot_id,
+                                               std::uint32_t sequence,
+                                               char* out_name,
+                                               std::size_t out_len) noexcept;
+[[nodiscard]] bool FormatSentCollisionFilenameForTest(const char* filename,
+                                                      std::uint32_t sequence,
+                                                      char* out_name,
+                                                      std::size_t out_len) noexcept;
+
 /// @brief Initialize outbox directories on SD card.
 /// Creates outbox/pending/ and outbox/sent/ if they don't exist.
 /// Scans pending/ for files from prior boot.
@@ -29,8 +42,8 @@ struct FileEntry {
 /// @return true if directories ensured.
 [[nodiscard]] bool Init(const char* mount_point) noexcept;
 
-/// @brief Append a parameter JSON line to the current pending file.
-/// Creates a new params_<epoch>.jsonl file if needed (rotation).
+/// @brief Append a parameter JSON line to the active non-uploadable file.
+/// Creates a new params_active_<boot>_<seq>.jsonl file if needed.
 /// @param json_line Null-terminated JSON line to append.
 /// @return true if append succeeded.
 [[nodiscard]] bool AppendParameter(const char* json_line) noexcept;
@@ -41,8 +54,12 @@ struct FileEntry {
 /// @return true if write succeeded.
 [[nodiscard]] bool AppendFailure(const char* json_line) noexcept;
 
-/// @brief Rotate to a new parameter file (start new epoch).
-/// @return true if rotation succeeded.
+/// @brief Seal the active parameter file into an immutable uploadable file.
+/// @return true if no active file existed or sealing succeeded.
+[[nodiscard]] bool SealParameterFile() noexcept;
+
+/// @brief Drop the current active parameter file name so next append creates one.
+/// @return true if rotation state reset succeeded.
 [[nodiscard]] bool RotateParameterFile() noexcept;
 
 /// @brief Get list of pending files sorted by priority.

@@ -1,6 +1,15 @@
 #include "lsm6ds3.hpp"
 
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+
 namespace sensor {
+
+namespace {
+
+constexpr std::uint32_t kResetDelayMs = 15U;
+
+} // namespace
 
 Lsm6ds3::Lsm6ds3(const Config& config) : config_(config) {
     accel_sensitivity_ = lsm6ds3::accel_range_to_sensitivity(config_.imu_config.accel_range);
@@ -12,17 +21,18 @@ bool Lsm6ds3::init() {
 
     uint8_t device_id = 0;
     if (!config_.read_cb(static_cast<uint8_t>(lsm6ds3::Register::WHO_AM_I), &device_id, 1)) return false;
-    
-    // 0x6A for LSM6DS3TR-C, 0x69 for standard LSM6DS3. 
-    if (device_id != lsm6ds3::LSM6DS3_ID && device_id != 0x69) return false; 
+
+    // 0x6A for LSM6DS3TR-C, 0x69 for standard LSM6DS3.
+    if (device_id != lsm6ds3::LSM6DS3_ID && device_id != 0x69) return false;
 
     if (!write_register(lsm6ds3::Register::CTRL3_C, 0x01)) return false;
-    // Host should wait ~15ms after this in reality for SW Reset
+    // Host must wait ~15ms after SW reset before post-reset register access.
+    vTaskDelay(pdMS_TO_TICKS(kResetDelayMs));
 
     if (!write_register(lsm6ds3::Register::CTRL3_C, 0x44)) return false;
 
     // Shift Accel Range into FS_XL bits [3:2]
-    uint8_t ctrl1_xl = (static_cast<uint8_t>(config_.imu_config.accel_odr) << 4) | 
+    uint8_t ctrl1_xl = (static_cast<uint8_t>(config_.imu_config.accel_odr) << 4) |
                        (static_cast<uint8_t>(config_.imu_config.accel_range) << 2);
     if (!write_register(lsm6ds3::Register::CTRL1_XL, ctrl1_xl)) return false;
 
@@ -30,9 +40,9 @@ bool Lsm6ds3::init() {
     uint8_t gyro_fs_bits = static_cast<uint8_t>(config_.imu_config.gyro_range);
     uint8_t ctrl2_g = (static_cast<uint8_t>(config_.imu_config.gyro_odr) << 4);
     if (config_.imu_config.gyro_range == lsm6ds3::GyroRange::DPS_125) {
-        ctrl2_g |= 0x02; 
+        ctrl2_g |= 0x02;
     } else {
-        ctrl2_g |= (gyro_fs_bits << 2); 
+        ctrl2_g |= (gyro_fs_bits << 2);
     }
     return write_register(lsm6ds3::Register::CTRL2_G, ctrl2_g);
 }
@@ -84,10 +94,10 @@ bool Lsm6ds3::configure_int2(const Int2Config& cfg) {
 bool Lsm6ds3::configure_fifo(FifoMode mode, uint16_t watermark_threshold) {
     if (!write_register(lsm6ds3::Register::FIFO_CTRL1, watermark_threshold & 0xFF)) return false;
     if (!write_register(lsm6ds3::Register::FIFO_CTRL2, (watermark_threshold >> 8) & 0x0F)) return false;
-    
+
     // DEC_FIFO_XL = 001 (No dec.), DEC_FIFO_G = 001 (No dec.) => 0x09
-    if (!write_register(lsm6ds3::Register::FIFO_CTRL3, 0x09)) return false; 
-    
+    if (!write_register(lsm6ds3::Register::FIFO_CTRL3, 0x09)) return false;
+
     uint8_t ctrl5 = (0x04 << 3) | static_cast<uint8_t>(mode); // 104Hz FIFO ODR
     return write_register(lsm6ds3::Register::FIFO_CTRL5, ctrl5);
 }
@@ -105,14 +115,14 @@ bool Lsm6ds3::read_fifo_dataset(lsm6ds3::Value& out_gyro, lsm6ds3::Value& out_ac
     int16_t gx = static_cast<int16_t>((data[1] << 8) | data[0]);
     int16_t gy = static_cast<int16_t>((data[3] << 8) | data[2]);
     int16_t gz = static_cast<int16_t>((data[5] << 8) | data[4]);
-    
+
     int16_t ax = static_cast<int16_t>((data[7] << 8) | data[6]);
     int16_t ay = static_cast<int16_t>((data[9] << 8) | data[8]);
     int16_t az = static_cast<int16_t>((data[11] << 8) | data[10]);
 
     out_gyro = { gx * gyro_sensitivity_, gy * gyro_sensitivity_, gz * gyro_sensitivity_ };
     out_accel = { ax * accel_sensitivity_, ay * accel_sensitivity_, az * accel_sensitivity_ };
-    
+
     return true;
 }
 
@@ -162,7 +172,7 @@ bool Lsm6ds3::configure_motion_detection(uint8_t tap_ths, uint8_t wakeup_ths, ui
 
 // --- 4. Tilt & Embedded Pedometer (AWT) ---
 bool Lsm6ds3::enable_pedometer_and_tilt() {
-    uint8_t ctrl10_c = 0; 
+    uint8_t ctrl10_c = 0;
     if (!config_.read_cb(static_cast<uint8_t>(lsm6ds3::Register::CTRL10_C), &ctrl10_c, 1)) return false;
     ctrl10_c |= (1 << 2) | (1 << 3) | (1 << 4); // FUNC_EN, TILT_EN, PEDO_EN
     return write_register(lsm6ds3::Register::CTRL10_C, ctrl10_c);
@@ -170,14 +180,14 @@ bool Lsm6ds3::enable_pedometer_and_tilt() {
 
 uint16_t Lsm6ds3::get_step_count() {
     uint8_t data[2] = {0};
-    if (!config_.read_cb(static_cast<uint8_t>(lsm6ds3::Register::STEP_COUNTER_L), data, 2)) return 0; 
+    if (!config_.read_cb(static_cast<uint8_t>(lsm6ds3::Register::STEP_COUNTER_L), data, 2)) return 0;
     return (data[0] | (data[1] << 8));
 }
 
 Lsm6ds3::MotionEvents Lsm6ds3::get_motion_events() {
     MotionEvents events;
     uint8_t wake_src = 0, tap_src = 0, func_src = 0;
-    
+
     config_.read_cb(static_cast<uint8_t>(lsm6ds3::Register::WAKE_UP_SRC), &wake_src, 1);
     config_.read_cb(static_cast<uint8_t>(lsm6ds3::Register::TAP_SRC), &tap_src, 1);
     config_.read_cb(static_cast<uint8_t>(lsm6ds3::Register::FUNC_SRC1), &func_src, 1);

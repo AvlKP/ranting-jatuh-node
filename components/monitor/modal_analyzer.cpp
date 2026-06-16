@@ -1,0 +1,572 @@
+/// @file modal_analyzer.cpp
+/// @brief Post-hoc modal analysis algorithms for the monitor component.
+/// @details Implements TKEO decay-onset detection, dominant-axis sway selection,
+/// signed-gyro-axis FFT natural-frequency estimation, and peak-hold envelope OLS
+/// damping regression. All algorithms operate on the history buffers owned by
+/// sample_store.cpp and are called from the publisher path after a disturbance.
+/// @ingroup monitor
+
+#include "monitor.hpp"
+#include "monitor_internal.hpp"
+
+#include <cmath>
+#include <algorithm>
+#include <cstring>
+
+#include "dsps_fft2r.h"
+#include "dsps_view.h"
+#include "esp_timer.h"
+#include "esp_log.h"
+
+namespace monitor {
+
+bool Monitor::ComputeStats(MonitorResult& result) const noexcept {
+    const std::size_t count = BufferSize();
+    if (count == 0U) {
+        return false;
+    }
+
+    float roll_mean = 0.0f;
+    float roll_m2 = 0.0f;
+    float pitch_mean = 0.0f;
+    float pitch_m2 = 0.0f;
+
+    for (std::size_t i = 0U; i < count; ++i) {
+        const std::size_t idx = PhysicalIndex(i);
+        const float roll = roll_history_[idx];
+        const float pitch = pitch_history_[idx];
+
+        const float roll_delta = roll - roll_mean;
+        roll_mean += roll_delta / static_cast<float>(i + 1U);
+        const float roll_delta2 = roll - roll_mean;
+        roll_m2 += roll_delta * roll_delta2;
+
+        const float pitch_delta = pitch - pitch_mean;
+        pitch_mean += pitch_delta / static_cast<float>(i + 1U);
+        const float pitch_delta2 = pitch - pitch_mean;
+        pitch_m2 += pitch_delta * pitch_delta2;
+    }
+
+    result.roll_mean = roll_mean;
+    result.pitch_mean = pitch_mean;
+    result.roll_variance = (count > 1U) ? (roll_m2 / static_cast<float>(count - 1U)) : 0.0f;
+    result.pitch_variance = (count > 1U) ? (pitch_m2 / static_cast<float>(count - 1U)) : 0.0f;
+    result.sample_count = static_cast<std::uint32_t>(count);
+    result.timestamp_us = static_cast<std::uint64_t>(esp_timer_get_time());
+
+    return true;
+}
+
+Monitor::FftBinRange Monitor::SelectFftBinRange(std::size_t fft_size,
+                                                float sample_rate_hz) const noexcept {
+    FftBinRange range{};
+    if ((fft_size < 4U) || (sample_rate_hz <= 0.0f) ||
+        (config_.modal_freq_max_hz < config_.modal_freq_min_hz)) {
+        return range;
+    }
+
+    const float fft_size_f = static_cast<float>(fft_size);
+    std::size_t min_bin = static_cast<std::size_t>(
+        std::ceil((config_.modal_freq_min_hz * fft_size_f) / sample_rate_hz));
+    std::size_t max_bin = static_cast<std::size_t>(
+        std::floor((config_.modal_freq_max_hz * fft_size_f) / sample_rate_hz));
+
+    const std::size_t max_valid_bin = (fft_size / 2U) - 1U;
+    min_bin = std::max<std::size_t>(min_bin, 1U);
+    max_bin = std::min(max_bin, max_valid_bin);
+    if (min_bin > max_bin) {
+        return range;
+    }
+
+    range.min_bin = min_bin;
+    range.max_bin = max_bin;
+    range.valid = true;
+    return range;
+}
+
+bool Monitor::ComputeSwayAndDamping(MonitorResult& result) noexcept {
+    // 1. Sway statistics (entire disturbance buffer since entering DISTURBED)
+    const std::size_t sway_count = BufferSize();
+    if (sway_count < 3U) {
+        result.roll_sway_pp_max = 0.0f;
+        result.roll_sway_pp_mean = 0.0f;
+        result.pitch_sway_pp_max = 0.0f;
+        result.pitch_sway_pp_mean = 0.0f;
+    } else {
+        auto compute_sway_axis = [&](const std::array<float, kStorageSamples>& data,
+                                     float& sway_pp_max,
+                                     float& sway_pp_mean) {
+            const float min_amp = config_.peak_min_amplitude_deg;
+            const std::size_t min_spacing = config_.peak_min_spacing;
+
+            std::size_t last_ext_idx = 0U;
+            float last_ext_val = 0.0f;
+            bool has_last_ext = false;
+            float max_pp = 0.0f;
+            float sum_pp = 0.0f;
+            std::size_t pp_count = 0U;
+
+            for (std::size_t i = 1U; i + 1U < sway_count; ++i) {
+                const std::size_t idx_prev = PhysicalIndex(i - 1U);
+                const std::size_t idx_curr = PhysicalIndex(i);
+                const std::size_t idx_next = PhysicalIndex(i + 1U);
+
+                const float prev = data[idx_prev];
+                const float curr = data[idx_curr];
+                const float next = data[idx_next];
+
+                const bool is_peak = (curr > prev) && (curr > next) && (std::fabs(curr) >= min_amp);
+                const bool is_trough = (curr < prev) && (curr < next) && (std::fabs(curr) >= min_amp);
+
+                if (!(is_peak || is_trough)) {
+                    continue;
+                }
+
+                if (has_last_ext && ((i - last_ext_idx) < min_spacing)) {
+                    continue;
+                }
+
+                const float ext_val = curr;
+                if (has_last_ext) {
+                    const float pp = std::fabs(ext_val - last_ext_val);
+                    if (pp > max_pp) {
+                        max_pp = pp;
+                    }
+                    sum_pp += pp;
+                    ++pp_count;
+                }
+
+                last_ext_idx = i;
+                last_ext_val = ext_val;
+                has_last_ext = true;
+            }
+
+            sway_pp_max = max_pp;
+            sway_pp_mean = (pp_count > 0U) ? (sum_pp / static_cast<float>(pp_count)) : 0.0f;
+        };
+
+        compute_sway_axis(roll_history_, result.roll_sway_pp_max, result.roll_sway_pp_mean);
+        compute_sway_axis(pitch_history_, result.pitch_sway_pp_max, result.pitch_sway_pp_mean);
+    }
+
+    return true;
+}
+
+Monitor::DecayOnsetResult Monitor::FindDecayOnsetTkeo() const noexcept {
+    // Algorithm: TKEO energy-burst decay onset detection.
+    // Identifies the start of free-decay oscillation in a disturbance segment.
+    //
+    // 1. Compute non-negative TKEO over gmag history: psi[n] = max(0, gmag[n]^2 - gmag[n-1]*gmag[n+1])
+    // 2. Set energy floor: (10 * baseline_gmag)^2 to reject pull-hold/static noise
+    // 3. Threshold = max(energy_floor, 0.30 * max(psi)) selects the last significant energy burst
+    // 4. Find last index where psi > threshold (scan backward)
+    // 5. Snap to nearest local gmag maximum within +/-0.45s window
+    // 6. Validate: at least 20 samples and 2x amplitude drop from onset to tail
+    //
+    // Quality: Reliable if both gates pass; Low if region exists but fails gates; None if no burst found.
+    //
+    // @see imu_algorithms/_envelope.py::find_decay_onset_tkeo
+    DecayOnsetResult result{};
+    const std::size_t count = BufferSize();
+    if (count < 3U) {
+        return result;
+    }
+
+    constexpr float kBaselineGmagDps = 0.35f;
+    constexpr float kBurstQuantile = 0.30f;
+    constexpr float kSnapWindowS = 0.45f;
+    constexpr std::size_t kMinDecaySamples = 20U;
+    const float energy_floor = (10.0f * kBaselineGmagDps) * (10.0f * kBaselineGmagDps);
+
+    float psi_max = 0.0f;
+    for (std::size_t i = 1U; i + 1U < count; ++i) {
+        const float prev = gmag_history_[PhysicalIndex(i - 1U)];
+        const float curr = gmag_history_[PhysicalIndex(i)];
+        const float next = gmag_history_[PhysicalIndex(i + 1U)];
+        const float psi = (curr * curr) - (prev * next);
+        if (psi > psi_max) {
+            psi_max = psi;
+        }
+    }
+    if (psi_max < energy_floor) {
+        return result;
+    }
+
+    const float threshold = std::max(energy_floor, kBurstQuantile * psi_max);
+    std::size_t last_burst = 0U;
+    bool has_burst = false;
+    for (std::size_t i = count - 2U; i > 0U; --i) {
+        const float prev = gmag_history_[PhysicalIndex(i - 1U)];
+        const float curr = gmag_history_[PhysicalIndex(i)];
+        const float next = gmag_history_[PhysicalIndex(i + 1U)];
+        const float psi = std::max(0.0f, (curr * curr) - (prev * next));
+        if (psi > threshold) {
+            last_burst = i;
+            has_burst = true;
+            break;
+        }
+    }
+    if (!has_burst) {
+        return result;
+    }
+
+    const std::size_t snap_samples = std::max<std::size_t>(
+        1U,
+        static_cast<std::size_t>(std::round(kSnapWindowS * static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ))));
+    const std::size_t snap_start = (last_burst > snap_samples) ? (last_burst - snap_samples) : 0U;
+    const std::size_t snap_end = std::min(count - 1U, last_burst + snap_samples);
+    std::size_t best_idx = snap_start;
+    float best_dist = static_cast<float>(count);
+    float best_val = -1.0f;
+
+    for (std::size_t i = snap_start; i <= snap_end; ++i) {
+        const float curr = gmag_history_[PhysicalIndex(i)];
+        const bool local_max = (i > 0U) && ((i + 1U) < count) &&
+            curr > gmag_history_[PhysicalIndex(i - 1U)] &&
+            curr > gmag_history_[PhysicalIndex(i + 1U)];
+        if (local_max) {
+            const float dist = std::fabs(static_cast<float>(i) - static_cast<float>(last_burst));
+            if (dist < best_dist) {
+                best_dist = dist;
+                best_idx = i;
+            }
+        } else if (best_dist >= static_cast<float>(count) && curr > best_val) {
+            best_val = curr;
+            best_idx = i;
+        }
+    }
+
+    result.onset = std::min(best_idx, count - 1U);
+    const std::size_t decay_len = count - result.onset;
+    if (decay_len < kMinDecaySamples) {
+        result.quality = DecayQuality::Low;
+        return result;
+    }
+
+    const std::size_t onset_end = std::min(count - 1U, result.onset + kMinDecaySamples);
+    float onset_max = 0.0f;
+    for (std::size_t i = result.onset; i <= onset_end; ++i) {
+        onset_max = std::max(onset_max, gmag_history_[PhysicalIndex(i)]);
+    }
+
+    const std::size_t tail_len = std::max(kMinDecaySamples, decay_len / 4U);
+    const std::size_t tail_start = (count > tail_len) ? (count - tail_len) : result.onset;
+    float tail_min = gmag_history_[PhysicalIndex(tail_start)];
+    for (std::size_t i = tail_start; i < count; ++i) {
+        tail_min = std::min(tail_min, gmag_history_[PhysicalIndex(i)]);
+    }
+
+    result.quality = ((tail_min < 1.0e-9f) || ((onset_max / tail_min) < 2.0f)) ?
+        DecayQuality::Low : DecayQuality::Reliable;
+    return result;
+}
+
+Monitor::SwayAxisResult Monitor::ComputeDominantAxisSway(std::size_t start, std::size_t end) const noexcept {
+    SwayAxisResult result{};
+    const std::size_t count = BufferSize();
+    if ((start >= count) || (end <= start) || (end > count)) {
+        return result;
+    }
+
+    const float dt = 1.0f / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    float cx = 0.0f, cy = 0.0f, cz = 0.0f;
+    float min_x = 0.0f, max_x = 0.0f;
+    float min_y = 0.0f, max_y = 0.0f;
+    float min_z = 0.0f, max_z = 0.0f;
+    bool first = true;
+
+    for (std::size_t i = start; i < end; ++i) {
+        const std::size_t idx = PhysicalIndex(i);
+        cx += gx_history_[idx] * dt;
+        cy += gy_history_[idx] * dt;
+        cz += gz_history_[idx] * dt;
+
+        if (first) {
+            min_x = max_x = cx;
+            min_y = max_y = cy;
+            min_z = max_z = cz;
+            first = false;
+        } else {
+            if (cx < min_x) min_x = cx;
+            if (cx > max_x) max_x = cx;
+            if (cy < min_y) min_y = cy;
+            if (cy > max_y) max_y = cy;
+            if (cz < min_z) min_z = cz;
+            if (cz > max_z) max_z = cz;
+        }
+    }
+
+    result.sx_deg = max_x - min_x;
+    result.sy_deg = max_y - min_y;
+    result.sz_deg = max_z - min_z;
+
+    const float ax_abs = result.sx_deg;
+    const float ay_abs = result.sy_deg;
+    const float az_abs = result.sz_deg;
+    if (ax_abs >= ay_abs && ax_abs >= az_abs) {
+        result.dominant = DominantAxis::X;
+        result.valid = ax_abs > 0.0f;
+    } else if (ay_abs >= az_abs) {
+        result.dominant = DominantAxis::Y;
+        result.valid = ay_abs > 0.0f;
+    } else {
+        result.dominant = DominantAxis::Z;
+        result.valid = az_abs > 0.0f;
+    }
+    return result;
+}
+
+float Monitor::ComputeSignedAxisNaturalFrequency(DominantAxis axis,
+                                                 std::size_t start,
+                                                 std::size_t count) noexcept {
+    const std::size_t buffer_count = BufferSize();
+    if ((count < 4U) || (start >= buffer_count)) {
+        return 0.0f;
+    }
+    count = std::min(count, buffer_count - start);
+    if (count > kFftWindowSamples) {
+        start += count - kFftWindowSamples;
+        count = kFftWindowSamples;
+    }
+
+    const float sample_rate_hz = static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    const std::size_t fft_size = (count <= 512U) ? 512U : kFftWindowSamples;
+    const FftBinRange range = SelectFftBinRange(fft_size, sample_rate_hz);
+    if (!range.valid) {
+        return 0.0f;
+    }
+
+    std::fill(fft_input_.begin(), fft_input_.begin() + (fft_size * 2U), 0.0f);
+    float sum = 0.0f;
+    for (std::size_t i = 0U; i < count; ++i) {
+        const std::size_t idx = PhysicalIndex(start + i);
+        float val = gx_history_[idx];
+        if (axis == DominantAxis::Y) {
+            val = gy_history_[idx];
+        } else if (axis == DominantAxis::Z) {
+            val = gz_history_[idx];
+        }
+        fft_input_[2U * i] = val;
+        sum += val;
+    }
+
+    const float mean = sum / static_cast<float>(count);
+    for (std::size_t i = 0U; i < count; ++i) {
+        const float window = 0.5f - 0.5f *
+            std::cos(kTwoPi * static_cast<float>(i) / static_cast<float>(count - 1U));
+        fft_input_[2U * i] = (fft_input_[2U * i] - mean) * window;
+        fft_input_[2U * i + 1U] = 0.0f;
+    }
+
+    if (dsps_fft2r_fc32(fft_input_.data(), static_cast<int>(fft_size)) != ESP_OK) {
+        return 0.0f;
+    }
+    if (dsps_bit_rev_fc32(fft_input_.data(), static_cast<int>(fft_size)) != ESP_OK) {
+        return 0.0f;
+    }
+
+    float max_power = 0.0f;
+    std::size_t max_bin = 0U;
+    for (std::size_t bin = range.min_bin; bin <= range.max_bin; ++bin) {
+        const float real = fft_input_[2U * bin];
+        const float imag = fft_input_[2U * bin + 1U];
+        const float power = (real * real) + (imag * imag);
+        if (power > max_power) {
+            max_power = power;
+            max_bin = bin;
+        }
+    }
+
+    return (max_bin == 0U) ? 0.0f :
+        (static_cast<float>(max_bin) * sample_rate_hz) / static_cast<float>(fft_size);
+}
+
+Monitor::DampingFitResult Monitor::ComputePeakHoldDamping(std::size_t start,
+                                                          std::size_t count,
+                                                          float natural_freq_hz,
+                                                          DecayQuality quality) noexcept {
+    // Algorithm: OLS log-fit damping ratio from peak-hold envelope.
+    //
+    // 1. Build asymmetric peak-hold envelope over gmag decay region:
+    //    env[0] = gmag[start]
+    //    env[n] = max(gmag[n], alpha * env[n-1])  where alpha = exp(-2*pi*fc*dt), fc = 2 Hz
+    //    Rises instantly with signal, decays exponentially between peaks.
+    //
+    // 2. Skip first ~1 cycle (transient) to avoid onset artifacts.
+    //
+    // 3. Compute lower fit bound: max(4 * baseline_noise, 0.03 * peak_after_skip).
+    //    Only samples above this bound participate in the fit (bounded fit mode).
+    //
+    // 4. OLS linear regression on ln(env) vs time:
+    //    slope = (N*sum(t*ln_e) - sum(t)*sum(ln_e)) / (N*sum(t^2) - (sum(t))^2)
+    //    zeta = -slope / (2*pi*fn)  clamped to [0, 1]
+    //
+    // 5. R-squared: 1 - SS_res / SS_tot
+    //
+    // 6. Confidence: high  (r^2>0.90, 3+ cycles, >4 samples/cycle, quality==Reliable)
+    //                medium (r^2>0.70, amplitude drop > 2x)
+    //                low    (otherwise)
+    //
+    // @see imu_algorithms/_envelope.py::damping_from_envelope
+    // @see imu_algorithms/_envelope.py::envelope_peak_hold
+    DampingFitResult result{};
+    SetConfidence(result.confidence, "low");
+    if ((quality == DecayQuality::None) || (natural_freq_hz <= 0.0f) || (count < 10U)) {
+        return result;
+    }
+
+    constexpr float kBaselineGmagDps = 0.35f;
+    constexpr float kEnvelopeFcHz = 2.0f;
+    constexpr std::size_t kMinFitSamples = 10U;
+    constexpr float kMinFitCycles = 2.0f;
+    constexpr float kMinAmplitudeDrop = 2.0f;
+    constexpr float kHighConfMinSamplesPerCycle = 4.0f;
+
+    const float dt = 1.0f / static_cast<float>(CONFIG_MONITOR_IMU_RATE_HZ);
+    const float alpha = std::exp(-kTwoPi * kEnvelopeFcHz * dt);
+    for (std::size_t i = 0U; i < count; ++i) {
+        const float val = std::max(0.0f, gmag_history_[PhysicalIndex(start + i)]);
+        residual_scratch_[i] = (i == 0U) ? val : std::max(val, alpha * residual_scratch_[i - 1U]);
+    }
+
+    const float period_samples = 1.0f / (natural_freq_hz * dt);
+    std::size_t skip = static_cast<std::size_t>(std::round(period_samples));
+    if (skip + kMinFitSamples > count) {
+        skip = 0U;
+    }
+
+    float peak_env = 0.0f;
+    for (std::size_t i = skip; i < count; ++i) {
+        peak_env = std::max(peak_env, residual_scratch_[i]);
+    }
+    const float lower_bound = std::max(std::max(4.0f * kBaselineGmagDps, 0.03f * peak_env), 1.0e-6f);
+
+    float env_max = 0.0f;
+    float env_min = 0.0f;
+    bool has_min = false;
+    std::size_t n = 0U;
+    float sum_t = 0.0f;
+    float sum_y = 0.0f;
+    float sum_ty = 0.0f;
+    float sum_t2 = 0.0f;
+    for (std::size_t i = skip; i < count; ++i) {
+        const float env = residual_scratch_[i];
+        if (env <= lower_bound) {
+            continue;
+        }
+        env_max = std::max(env_max, env);
+        env_min = has_min ? std::min(env_min, env) : env;
+        has_min = true;
+        const float t = static_cast<float>(i) * dt;
+        const float y = std::log(env);
+        sum_t += t;
+        sum_y += y;
+        sum_ty += t * y;
+        sum_t2 += t * t;
+        ++n;
+    }
+
+    if ((n < kMinFitSamples) || !has_min || (env_min < 1.0e-9f)) {
+        return result;
+    }
+    const float amp_drop = env_max / env_min;
+    const float fit_cycles = static_cast<float>(n) * dt * natural_freq_hz;
+    if ((amp_drop < kMinAmplitudeDrop) || (fit_cycles < kMinFitCycles)) {
+        return result;
+    }
+
+    const float nf = static_cast<float>(n);
+    const float denominator = (nf * sum_t2) - (sum_t * sum_t);
+    if (std::fabs(denominator) < 1.0e-15f) {
+        return result;
+    }
+    const float slope = ((nf * sum_ty) - (sum_t * sum_y)) / denominator;
+    if (slope > 0.0f) {
+        return result;
+    }
+
+    const float mean_y = sum_y / nf;
+    const float intercept = (sum_y - slope * sum_t) / nf;
+    float ss_res = 0.0f;
+    float ss_tot = 0.0f;
+    for (std::size_t i = skip; i < count; ++i) {
+        const float env = residual_scratch_[i];
+        if (env <= lower_bound) {
+            continue;
+        }
+        const float t = static_cast<float>(i) * dt;
+        const float y = std::log(env);
+        const float pred = intercept + slope * t;
+        ss_res += (y - pred) * (y - pred);
+        ss_tot += (y - mean_y) * (y - mean_y);
+    }
+    if (ss_tot < 1.0e-15f) {
+        return result;
+    }
+
+    const float r_squared = 1.0f - (ss_res / ss_tot);
+    result.damping_ratio = std::clamp(-slope / (kTwoPi * natural_freq_hz), 0.0f, 1.0f);
+    if ((r_squared > 0.90f) && (fit_cycles >= 3.0f) &&
+        (amp_drop >= kMinAmplitudeDrop) && (period_samples >= kHighConfMinSamplesPerCycle) &&
+        (quality == DecayQuality::Reliable)) {
+        SetConfidence(result.confidence, "high");
+    } else if ((r_squared > 0.70f) && (amp_drop >= kMinAmplitudeDrop)) {
+        SetConfidence(result.confidence, (quality == DecayQuality::Low) ? "medium" : "medium");
+    } else {
+        SetConfidence(result.confidence, "low");
+    }
+
+    return result;
+}
+
+Monitor::EventAnalysisResult Monitor::AnalyzeImuEvent() noexcept {
+    EventAnalysisResult result{};
+    SetConfidence(result.damping_confidence, "low");
+    const std::size_t count = BufferSize();
+    if (count < 4U) {
+        return result;
+    }
+
+    const DecayOnsetResult decay = FindDecayOnsetTkeo();
+    if (decay.quality == DecayQuality::None || decay.onset >= count) {
+        return result;
+    }
+
+    const SwayAxisResult sway = ComputeDominantAxisSway(0U, count);
+    if (!sway.valid) {
+        return result;
+    }
+
+    const std::size_t decay_count = count - decay.onset;
+    result.natural_freq_hz = ComputeSignedAxisNaturalFrequency(sway.dominant, decay.onset, decay_count);
+    if (result.natural_freq_hz <= 0.0f) {
+        return result;
+    }
+
+    if (peak_gmag_ < config_.noise_gate_gmag_dps) {
+        ESP_LOGD(kTag, "Noise gate: peak_gmag=%.3f < threshold=%.3f, skipping damping",
+                 static_cast<double>(peak_gmag_), static_cast<double>(config_.noise_gate_gmag_dps));
+        result.damping_ratio = 0.0f;
+        SetConfidence(result.damping_confidence, "low");
+        return result;
+    }
+
+    const DampingFitResult damping = ComputePeakHoldDamping(decay.onset,
+                                                            decay_count,
+                                                            result.natural_freq_hz,
+                                                            decay.quality);
+    result.damping_ratio = damping.damping_ratio;
+    result.damping_confidence = damping.confidence;
+    return result;
+}
+
+void Monitor::SetConfidence(std::array<char, MonitorResult::kDampingConfidenceMax>& dst,
+                            const char* src) noexcept {
+    dst.fill('\0');
+    if (src == nullptr) {
+        src = "low";
+    }
+    std::strncpy(dst.data(), src, dst.size() - 1U);
+}
+
+} // namespace monitor
