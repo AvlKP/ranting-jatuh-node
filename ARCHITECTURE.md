@@ -17,11 +17,17 @@ Ranting Jatuh Node: ESP32-S3 firmware for tree-branch structural health monitori
 | `main/test_main.cpp` | — | Unity test runner entry |
 | `main/pins.hpp` | 51 L | GPIO pinout for custom PCB |
 | `main/CMakeLists.txt` | — | Three build variants: normal / raw-logger / tests |
-| `components/monitor/monitor.cpp` | 1589 L | Core: FSM, TKEO, FFT, damping, AE spectral |
-| `components/monitor/include/monitor.hpp` | 528 L | Public API, structs, constants, FSM classes |
+| `components/monitor/monitor.cpp` | 225 L | Facade: Init, Update, ReadImu, CheckFailureEvents, SetCalibrationBiases |
+| `components/monitor/monitor_task.cpp` | 143 L | FreeRTOS task loop + per-sample orchestration |
+| `components/monitor/sample_store.cpp` | 184 L | Ring buffer management, snapshots, pre-trigger buffer |
+| `components/monitor/disturbance_detector.cpp` | 59 L | TKEO window + Schmitt trigger FSM |
+| `components/monitor/modal_analyzer.cpp` | 503 L | Decay onset, dominant axis, FFT, damping, stats |
+| `components/monitor/ae_detector.cpp` | 309 L | AE GPIO/ADC/spectral handling + ISR/task state |
+| `components/monitor/monitor_publisher.cpp` | 87 L | ESP event publication + drop counters |
+| `components/monitor/include/monitor.hpp` | 532 L | Public API, structs, constants, FSM classes |
 | `components/monitor/include/monitor_events.hpp` | — | ESP event declarations (MONITOR_EVENT_BASE) |
 | `components/monitor/include/calibration.hpp` | — | CalibrationBias struct + NVS read/write |
-| `components/monitor/CMakeLists.txt` | — | Req: lsm6ds3, filter, esp-dsp, esp_timer, driver, esp_adc |
+| `components/monitor/CMakeLists.txt` | — | Req: lsm6ds3, filter, esp-dsp, esp_timer, driver, esp_adc, log, esp_event, freertos, runtime, nvs_flash. 7 SRCS (monitor + 6 split modules). |
 | `components/monitor/Kconfig` | — | All MONITOR_* config keys |
 | `components/monitor/test/` | — | test_monitor_modal.cpp, test_monitor_algorithms.cpp, test_logger_formatting.cpp |
 | `components/logger/logger.cpp` | 388 L | Task loop, event dequeue, format + dispatch |
@@ -57,8 +63,8 @@ Ranting Jatuh Node: ESP32-S3 firmware for tree-branch structural health monitori
 | `imu_algorithms/_ringbuffer.py` | — | Python reference: ring buffer for streaming path |
 | `imu_algorithms/_io.py` | — | Python reference: CSV loading utilities |
 | `docs/natural-frequency-pipeline.md` | — | Deep-dive on FFT + damping algorithm |
-| `openspec/specs/` | — | 17 capability specs |
-| `openspec/changes/` | — | 1 active change + archive/ |
+| `openspec/specs/` | — | 24 capability specs |
+| `openspec/changes/` | — | No active changes; 5 archived in archive/ |
 | `README.md` | — | Project overview |
 | `mqtt_interface.md` | — | MQTT topic schema |
 | `CMakeLists.txt` | — | Top-level ESP-IDF project file |
@@ -93,7 +99,7 @@ graph TD
 | Component | Depends On |
 |-----------|------------|
 | `main` | monitor, logger, dashboard, sdmmc, fatfs |
-| `monitor` | lsm6ds3, filter, esp-dsp, esp_timer, driver, esp_adc |
+| `monitor` | lsm6ds3, filter, esp-dsp, esp_timer, driver, esp_adc, runtime, nvs_flash |
 | `logger` | monitor, nvs_flash, esp_wifi, esp_event, mqtt, esp_timer |
 | `lsm6ds3` | driver |
 | `filter` | (none, header-only except ekf_filter.cpp) |
@@ -200,8 +206,8 @@ flowchart LR
 | 2 | `calibrated = raw - bias`. Biases in NVS key "imu_bias" (CalibrationBias blob). Hardcoded defaults at `main.cpp:247-255`. | `calibration.hpp` |
 | 3 | Roll/pitch [deg]. Self-tuning alpha: `alpha = 1 - (1 - alpha_base) * 1/(1 + K * abs(accel_mag - 1.0))` | `adaptive_complementary_filter.hpp:34` |
 | 4 | `gmag = sqrt(gx^2 + gy^2 + gz^2)` | inline in Monitor::Update() |
-| 5 | TKEO 3-sample sliding window: `psi[n] = x[n-1]^2 - x[n-2] * x[n]`. 1-sample latency. | `monitor.cpp:68 TkeoWindow::Push()` |
-| 6 | Schmitt trigger FSM: IDLE/DISTURBED with hysteresis + quiet debounce. | `monitor.cpp:96 DspDisturbanceDetector::Update()` |
+| 5 | TKEO 3-sample sliding window: `psi[n] = x[n-1]^2 - x[n-2] * x[n]`. 1-sample latency. | `disturbance_detector.cpp:11 TkeoWindow::Push()` |
+| 6 | Schmitt trigger FSM: IDLE/DISTURBED with hysteresis + quiet debounce. | `disturbance_detector.cpp:39 DspDisturbanceDetector::Update()` |
 | 7 | IDLE: rolling history + short buffer. IDLE->DISTURBED: short buffer -> event buffer. DISTURBED: refresh if near full. DISTURBED->IDLE: AnalyzeImuEvent(), publish, reset. | `monitor.cpp` PushSample(), ComputeAndPublish() |
 | 8 | TKEO decay onset -> dominant axis -> FFT natural freq -> peak-hold envelope OLS damping. Runs on DISTURBED->IDLE only. | See §6 |
 | 9 | Free-fall: LSM6DS3 INT1 -> WAKE_UP_SRC. AE GPIO: GPIO15 rising ISR. AE ADC: ADC1_CH0 vs threshold. AE Spectral: AeSpectralTask -> continuous ADC -> FFT -> energy -> latch. | `monitor.cpp` CheckFailureEvents() |
@@ -214,18 +220,18 @@ Triggered on DISTURBED→IDLE only (NOT on buffer refresh). Full sequence:
 
 ```mermaid
 flowchart TD
-    A[AnalyzeImuEvent<br/>monitor.cpp:1501] --> B[1. FindDecayOnsetTkeo]
+    A[AnalyzeImuEvent<br/>modal_analyzer.cpp:522] --> B[1. FindDecayOnsetTkeo]
     B --> C{"quality == None<br/>or onset >= count?"}
     C -->|yes| ZERO[short-circuit:<br/>freq=0, damping=0]
-    C -->|no| D[2. ComputeDominantAxisSway<br/>monitor.cpp:1257]
+    C -->|no| D[2. ComputeDominantAxisSway<br/>modal_analyzer.cpp:264]
     D --> E{"valid?"}
     E -->|no| ZERO
-    E -->|yes| F[3. ComputeSignedAxisNaturalFrequency<br/>monitor.cpp:1298]
+    E -->|yes| F[3. ComputeSignedAxisNaturalFrequency<br/>modal_analyzer.cpp:319]
     F --> G{"natural_freq_hz > 0?"}
     G -->|no| ZERO
     G -->|yes| H{"peak_gmag < noise_gate?"}
     H -->|yes| FREQ_ONLY[publish frequency only<br/>damping=0]
-    H -->|no| I[4. ComputePeakHoldDamping<br/>monitor.cpp:1363]
+    H -->|no| I[4. ComputePeakHoldDamping<br/>modal_analyzer.cpp:384]
     I --> J[damping_ratio + confidence]
     J --> K[Publish full MonitorResult]
 ```
@@ -234,11 +240,11 @@ flowchart TD
 
 | Stage | Function | File:Line | What it does |
 |-------|----------|-----------|--------------|
-| 1. Decay onset | `FindDecayOnsetTkeo()` | `monitor.cpp` | Non-negative TKEO over gmag buffer. energy_floor = (10 × 0.35)². threshold = max(energy_floor, 0.30 × max(psi_pos)). Find last psi_pos > threshold → snap to nearest local gmag peak (±0.45s). Validate: ≥20 samples, ≥2× amplitude drop. Returns onset index + quality (Reliable/Low/None). |
-| 2. Dominant axis | `ComputeDominantAxisSway()` | `monitor.cpp:1257` | Integrate gx, gy, gz: angle = sum(gyro_axis × dt). Sway = max(cumsum) - min(cumsum) per axis. Dominant = largest peak-to-peak. Returns SwayAxisResult. |
-| 3. Natural freq | `ComputeSignedAxisNaturalFrequency()` | `monitor.cpp:1298` | Signed dominant-axis gyro[onset..end]. Truncate to last min(count,1024). De-mean → Hann → zero-pad 512/1024. dsps_fft2r_fc32 → dsps_bit_rev_fc32. Scan power in band (0.5–12 Hz). Peak bin → Hz. |
-| 3.5 Noise gate | (inline in AnalyzeImuEvent)| `monitor.cpp:1525` | If peak_gmag < noise_gate_gmag_dps → skip damping, publish frequency only. |
-| 4. Damping | `ComputePeakHoldDamping()` | `monitor.cpp:1363` | Asymmetric peak-hold envelope: env[n] = max(gmag[n], alpha×env[n-1]), alpha=exp(-2π×fc×dt), fc=2Hz. Skip 1st cycle. Lower bound: max(4×0.35, 0.03×peak). OLS on ln(env) vs time: zeta = -slope/(2π×fn). |
+| 1. Decay onset | `FindDecayOnsetTkeo()` | `modal_analyzer.cpp:155` | Non-negative TKEO over gmag buffer. energy_floor = (10 × 0.35)². threshold = max(energy_floor, 0.30 × max(psi_pos)). Find last psi_pos > threshold → snap to nearest local gmag peak (±0.45s). Validate: ≥20 samples, ≥2× amplitude drop. Returns onset index + quality (Reliable/Low/None). |
+| 2. Dominant axis | `ComputeDominantAxisSway()` | `modal_analyzer.cpp:264` | Integrate gx, gy, gz: angle = sum(gyro_axis × dt). Sway = max(cumsum) - min(cumsum) per axis. Dominant = largest peak-to-peak. Returns SwayAxisResult. |
+| 3. Natural freq | `ComputeSignedAxisNaturalFrequency()` | `modal_analyzer.cpp:319` | Signed dominant-axis gyro[onset..end]. Truncate to last min(count,1024). De-mean → Hann → zero-pad 512/1024. dsps_fft2r_fc32 → dsps_bit_rev_fc32. Scan power in band (0.5–12 Hz). Peak bin → Hz. |
+| 3.5 Noise gate | (inline in AnalyzeImuEvent)| `modal_analyzer.cpp:546` | If peak_gmag < noise_gate_gmag_dps → skip damping, publish frequency only. |
+| 4. Damping | `ComputePeakHoldDamping()` | `modal_analyzer.cpp:384` | Asymmetric peak-hold envelope: env[n] = max(gmag[n], alpha×env[n-1]), alpha=exp(-2π×fc×dt), fc=2Hz. Skip 1st cycle. Lower bound: max(4×0.35, 0.03×peak). OLS on ln(env) vs time: zeta = -slope/(2π×fn). |
 
 **Confidence tiers:**
 
@@ -270,7 +276,7 @@ flowchart TD
 ## 7. MonitorResult Output Fields
 
 ```cpp
-// monitor.hpp:119
+// monitor.hpp:120
 struct MonitorResult {
     float roll_mean, roll_variance, pitch_mean, pitch_variance;
     float roll_sway_pp_max, roll_sway_pp_mean, pitch_sway_pp_max, pitch_sway_pp_mean;
@@ -334,16 +340,16 @@ All Kconfig defaults have scaled-integer representation (×10 or ×100) to avoid
 |---------|-------|-----------|-------------------|
 | `MONITOR_IMU_RATE_HZ` | 1:1 | — (direct constant) | — |
 | `MONITOR_STORAGE_MINUTES` | 1:1 | — (→ kStorageSamples) | — |
-| `MONITOR_MODAL_FREQ_MIN_HZ_X10` | ÷10 | `modal_freq_min_hz` | monitor.hpp:89 |
-| `MONITOR_MODAL_FREQ_MAX_HZ_X10` | ÷10 | `modal_freq_max_hz` | monitor.hpp:90 |
-| `MONITOR_DSP_TKEO_HIGH_X10` | ÷10 | `dsp_tkeo_high` | monitor.hpp:91 |
-| `MONITOR_DSP_TKEO_LOW_X10` | ÷10 | `dsp_tkeo_low` | monitor.hpp:92 |
-| `MONITOR_DSP_GMAG_ONSET_X100` | ÷100 | `dsp_gmag_onset_dps` | monitor.hpp:93 |
-| `MONITOR_DSP_GMAG_QUIET_X100` | ÷100 | `dsp_gmag_quiet_dps` | monitor.hpp:94 |
-| `MONITOR_DISTURBED_EXIT_DEBOUNCE` | 1:1 | `dsp_quiet_debounce` | monitor.hpp:95 |
-| `MONITOR_NOISE_GATE_GMAG_X10` | ÷10 | `noise_gate_gmag_dps` | monitor.hpp:96 |
-| `MONITOR_PEAK_MIN_AMPLITUDE_X10` | ÷10 | `peak_min_amplitude_deg` | monitor.hpp:87 |
-| `MONITOR_PEAK_MIN_SPACING_SAMPLES` | 1:1 | `peak_min_spacing` | monitor.hpp:88 |
+| `MONITOR_MODAL_FREQ_MIN_HZ_X10` | ÷10 | `modal_freq_min_hz` | monitor.hpp:90 |
+| `MONITOR_MODAL_FREQ_MAX_HZ_X10` | ÷10 | `modal_freq_max_hz` | monitor.hpp:91 |
+| `MONITOR_DSP_TKEO_HIGH_X10` | ÷10 | `dsp_tkeo_high` | monitor.hpp:92 |
+| `MONITOR_DSP_TKEO_LOW_X10` | ÷10 | `dsp_tkeo_low` | monitor.hpp:93 |
+| `MONITOR_DSP_GMAG_ONSET_X100` | ÷100 | `dsp_gmag_onset_dps` | monitor.hpp:94 |
+| `MONITOR_DSP_GMAG_QUIET_X100` | ÷100 | `dsp_gmag_quiet_dps` | monitor.hpp:95 |
+| `MONITOR_DISTURBED_EXIT_DEBOUNCE` | 1:1 | `dsp_quiet_debounce` | monitor.hpp:96 |
+| `MONITOR_NOISE_GATE_GMAG_X10` | ÷10 | `noise_gate_gmag_dps` | monitor.hpp:97 |
+| `MONITOR_PEAK_MIN_AMPLITUDE_X10` | ÷10 | `peak_min_amplitude_deg` | monitor.hpp:88 |
+| `MONITOR_PEAK_MIN_SPACING_SAMPLES` | 1:1 | `peak_min_spacing` | monitor.hpp:89 |
 
 ---
 
@@ -375,13 +381,13 @@ RX         = GPIO 44   (Debug UART)
 
 | # | Issue | Location | Impact |
 |---|-------|----------|--------|
-| 1 | Dominant axis uses cumulative sum (not peak-to-peak) | `ComputeDominantAxisSway()` monitor.cpp | Symmetric oscillations → near-zero cumulative → wrong dominant axis |
+| 1 | Dominant axis uses cumulative sum (not peak-to-peak) | `ComputeDominantAxisSway()` modal_analyzer.cpp | Symmetric oscillations → near-zero cumulative → wrong dominant axis |
 | 2 | No frequency cross-validation (FFT only) | `ComputeSignedAxisNaturalFrequency()` | No detection of FFT artifacts or signal quality issues |
 | 3 | No event-type gating (all disturbances get damping) | `AnalyzeImuEvent()` → `ComputePeakHoldDamping()` | Noisy/meaningless damping for non-oscillatory events |
 | 4 | FFT tail truncation (last 1024 only) | `ComputeSignedAxisNaturalFrequency()` | Early decay (higher SNR) may be discarded |
 | 5 | No Python parity: classify_event, is_dynamic, extract_active_region | — | Missing event classification + active region extraction |
 
-When fixing #1: Python reference uses `max(cumsum) - min(cumsum)` for sway amplitude. C++ does the same but `DominantAxis` selection may differ from Python. Check `imu_algorithms/_extraction.py:extract_active_sway()`.
+When fixing #1: Python reference uses `max(cumsum) - min(cumsum)` for sway amplitude. C++ does the same but `DominantAxis` selection may differ from Python. Check `imu_algorithms/_extraction.py:extract_active_sway()` and `modal_analyzer.cpp:264`.
 
 ---
 
@@ -408,7 +414,7 @@ idf.py -T monitor test
 idf.py build           # Must compile clean (no warnings)
 ```
 
-**MonitorConfig defaults** are set in `monitor.hpp:80-108` as `MonitorConfig{} = default` using C++ field initializers reading Kconfig values. Any new Kconfig key must have a corresponding field in MonitorConfig and a default value.
+**MonitorConfig defaults** are set in `monitor.hpp:82-109` as `MonitorConfig{} = default` using C++ field initializers reading Kconfig values. Any new Kconfig key must have a corresponding field in MonitorConfig and a default value.
 
 ---
 
@@ -436,7 +442,7 @@ idf.py build           # Must compile clean (no warnings)
 
 ## 15. OpenSpec Integration
 
-Active specs live in `openspec/specs/`. 17 capability specs cover every subsystem. Current active change: `document-natural-frequency-pipeline` (complete).
+Active specs live in `openspec/specs/`. 24 capability specs cover every subsystem. No active changes; most recent archived: `re-sync-monitor-structure-and-atomics`, `fix-outbox-network-runtime-failures`, `firmware-structure-and-runtime-safety`.
 
 **Before implementing any change:** Read the relevant spec. Specs define behavior; code implements it.
 
@@ -444,7 +450,7 @@ Active specs live in `openspec/specs/`. 17 capability specs cover every subsyste
 
 | Area | Spec |
 |------|------|
-| FSM | `node-state-machine` |
+| FSM | `node-state-machine`, `logger-fsm-adaptation` |
 | Modal analysis | `free-decay-analysis`, `imu-event-analysis`, `envelope-damping-regression` |
 | Noise gate | `noise-gate` |
 | AE detector | `ae-spectral-detector` |
@@ -453,5 +459,7 @@ Active specs live in `openspec/specs/`. 17 capability specs cover every subsyste
 | Storage | `sd-upload-queue`, `raw-imu-recording` |
 | Dashboard | `dashboard-file-download`, `dashboard-fsm-adaptation`, `dashboard-time-format-fix` |
 | Runtime | `embedded-runtime-safety`, `monitor-mutex-safety` |
+| Structure | `firmware-structure` |
 | Identity | `node-id-topic-prefix`, `startup-time-sync` |
 | Filter | `adaptive-complementary-filter` |
+| Documentation | `readme-documentation`, `notebook-centerline-modal-analysis` |

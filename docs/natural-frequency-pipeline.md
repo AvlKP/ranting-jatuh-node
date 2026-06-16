@@ -1,12 +1,12 @@
  # Natural Frequency & Damping Pipeline
 
-> **Last verified:** 2026-06-16 against `components/monitor/monitor.cpp` @ 5bb1d4e
+> **Last verified:** 2026-06-16 against `components/monitor/modal_analyzer.cpp` @ 99879d9
 >
 > This document describes the current C++ firmware implementation. If the pipeline changes (new gates, different FFT strategy, modified confidence logic), update this document. Cross-reference line numbers to source files to detect drift.
 
 ## Overview
 
-The natural frequency and damping ratio are computed on **DISTURBED-to-IDLE** state transitions by `Monitor::AnalyzeImuEvent()` (`monitor.cpp:1501`). The pipeline chains five stages:
+The natural frequency and damping ratio are computed on **DISTURBED-to-IDLE** state transitions by `Monitor::AnalyzeImuEvent()` (`modal_analyzer.cpp:522`). The pipeline chains five stages:
 
 ```
 FSM transition → Decay onset (TKEO) → Dominant axis (sway) → FFT (signed gyro) → Damping (OLS log-fit)
@@ -57,12 +57,12 @@ sequenceDiagram
 
 | Stage | Function | File:Line |
 |-------|----------|-----------|
-| FSM trigger + orchestration | `AnalyzeImuEvent()` | `monitor.cpp:1501` |
-| Decay onset detection | `FindDecayOnsetTkeo()` | `monitor.cpp` (grep `FindDecayOnsetTkeo`) |
-| Dominant axis selection | `ComputeDominantAxisSway()` | `monitor.cpp:1257` |
-| Natural frequency (FFT) | `ComputeSignedAxisNaturalFrequency()` | `monitor.cpp:1298` |
-| Damping regression | `ComputePeakHoldDamping()` | `monitor.cpp:1363` |
-| FFT bin range helper | `SelectFftBinRange()` | `monitor.cpp:851` |
+| FSM trigger + orchestration | `AnalyzeImuEvent()` | `modal_analyzer.cpp:522` |
+| Decay onset detection | `FindDecayOnsetTkeo()` | `modal_analyzer.cpp:155` |
+| Dominant axis selection | `ComputeDominantAxisSway()` | `modal_analyzer.cpp:264` |
+| Natural frequency (FFT) | `ComputeSignedAxisNaturalFrequency()` | `modal_analyzer.cpp:319` |
+| Damping regression | `ComputePeakHoldDamping()` | `modal_analyzer.cpp:384` |
+| FFT bin range helper | `SelectFftBinRange()` | `modal_analyzer.cpp:60` |
 
 ---
 
@@ -198,26 +198,26 @@ The pipeline has multiple gates that independently short-circuit:
 
 | Gate | Checked In | Effect on Failure |
 |------|-----------|-------------------|
-| Decay quality `None` | `ComputePeakHoldDamping:1393` | Returns damping=0, confidence="low" |
-| `natural_freq_hz ≤ 0` | `ComputePeakHoldDamping:1393` | Returns damping=0, confidence="low" |
-| `count < 10` | `ComputePeakHoldDamping:1393` | Returns damping=0, confidence="low" |
-| Fit samples < 10 | `ComputePeakHoldDamping:1448` | Returns damping=0, confidence="low" |
-| Amplitude drop < 2× | `ComputePeakHoldDamping:1453` | Returns damping=0, confidence="low" |
-| Fit cycles < 2 | `ComputePeakHoldDamping:1453` | Returns damping=0, confidence="low" |
-| Denominator ≈ 0 | `ComputePeakHoldDamping:1459` | Returns damping=0, confidence="low" |
-| Slope > 0 (rising envelope) | `ComputePeakHoldDamping:1463` | Returns damping=0, confidence="low" |
-| `ss_tot < 1e-15` (flat envelope) | `ComputePeakHoldDamping:1482` | Returns damping=0, confidence="low" |
-| **Noise gate**: `peak_gmag < noise_gate_gmag_dps` | `AnalyzeImuEvent:1525` | Damping skipped entirely; frequency still published |
+| Decay quality `None` | `ComputePeakHoldDamping:413` | Returns damping=0, confidence="low" |
+| `natural_freq_hz ≤ 0` | `ComputePeakHoldDamping:413` | Returns damping=0, confidence="low" |
+| `count < 10` | `ComputePeakHoldDamping:413` | Returns damping=0, confidence="low" |
+| Fit samples < 10 | `ComputePeakHoldDamping:469` | Returns damping=0, confidence="low" |
+| Amplitude drop < 2× | `ComputePeakHoldDamping:474` | Returns damping=0, confidence="low" |
+| Fit cycles < 2 | `ComputePeakHoldDamping:474` | Returns damping=0, confidence="low" |
+| Denominator ≈ 0 | `ComputePeakHoldDamping:480` | Returns damping=0, confidence="low" |
+| Slope > 0 (rising envelope) | `ComputePeakHoldDamping:484` | Returns damping=0, confidence="low" |
+| `ss_tot < 1e-15` (flat envelope) | `ComputePeakHoldDamping:503` | Returns damping=0, confidence="low" |
+| **Noise gate**: `peak_gmag < noise_gate_gmag_dps` | `AnalyzeImuEvent:546` | Damping skipped entirely; frequency still published |
 
 ### Noise gate
 
-The noise gate is checked **after** FFT but **before** damping in `AnalyzeImuEvent()` (line 1525). It gates only damping — natural frequency is published regardless. This prevents noisy low-energy events from producing spurious damping estimates while still reporting the detected oscillation frequency.
+The noise gate is checked **after** FFT but **before** damping in `AnalyzeImuEvent()` (line 546). It gates only damping — natural frequency is published regardless. This prevents noisy low-energy events from producing spurious damping estimates while still reporting the detected oscillation frequency.
 
 ---
 
 ## Output Fields
 
-The `MonitorResult` struct (`monitor.hpp:119`) carries the pipeline results:
+The `MonitorResult` struct (`monitor.hpp:120`) carries the pipeline results:
 
 ```mermaid
 flowchart LR
@@ -253,7 +253,7 @@ flowchart LR
 
 The Python reference implementation in `imu_algorithms/_extraction.py` provides equivalent algorithms for offline validation. Key differences:
 
-| Aspect | C++ (`monitor.cpp`) | Python (`_extraction.py`) |
+| Aspect | C++ (`modal_analyzer.cpp`) | Python (`_extraction.py`) |
 |--------|---------------------|--------------------------|
 | **FFT library** | ESP-DSP `dsps_fft2r_fc32` (radix-2 complex) | NumPy `np.fft.rfft` (real FFT) |
 | **Window** | Hann: `0.5 - 0.5*cos(2π*i/(n-1))` | Hann: `np.hanning(n)` — mathematically identical |
@@ -281,14 +281,15 @@ The Python `Pipeline.process_csv()` (`_extraction.py:497`) computes all three (F
 
 | File | Key Content |
 |------|------------|
-| `components/monitor/monitor.cpp:1298` | `ComputeSignedAxisNaturalFrequency()` — FFT pipeline |
-| `components/monitor/monitor.cpp:1363` | `ComputePeakHoldDamping()` — envelope + OLS damping |
-| `components/monitor/monitor.cpp:1501` | `AnalyzeImuEvent()` — orchestration + gate chain |
-| `components/monitor/monitor.cpp:851` | `SelectFftBinRange()` — search band calculation |
-| `components/monitor/monitor.cpp:1257` | `ComputeDominantAxisSway()` — dominant axis selection |
-| `components/monitor/include/monitor.hpp:34` | `kFftWindowSamples` = 1024 (FFT window constant) |
-| `components/monitor/include/monitor.hpp:89` | `modal_freq_min_hz` / `modal_freq_max_hz` config fields |
-| `components/monitor/include/monitor.hpp:116` | `MonitorResult` struct (output fields) |
+| `components/monitor/modal_analyzer.cpp:155` | `FindDecayOnsetTkeo()` — TKEO decay onset detection |
+| `components/monitor/modal_analyzer.cpp:264` | `ComputeDominantAxisSway()` — dominant axis selection |
+| `components/monitor/modal_analyzer.cpp:319` | `ComputeSignedAxisNaturalFrequency()` — FFT pipeline |
+| `components/monitor/modal_analyzer.cpp:384` | `ComputePeakHoldDamping()` — envelope + OLS damping |
+| `components/monitor/modal_analyzer.cpp:522` | `AnalyzeImuEvent()` — orchestration + gate chain |
+| `components/monitor/modal_analyzer.cpp:60` | `SelectFftBinRange()` — search band calculation |
+| `components/monitor/include/monitor.hpp:36` | `kFftWindowSamples` = 1024 (FFT window constant) |
+| `components/monitor/include/monitor.hpp:90` | `modal_freq_min_hz` / `modal_freq_max_hz` config fields |
+| `components/monitor/include/monitor.hpp:120` | `MonitorResult` struct (output fields) |
 | `components/monitor/Kconfig:132` | `MONITOR_MODAL_FREQ_MIN_HZ_X10` (default 5 → 0.5 Hz) |
 | `components/monitor/Kconfig:140` | `MONITOR_MODAL_FREQ_MAX_HZ_X10` (default 120 → 12.0 Hz) |
 | `imu_algorithms/_extraction.py:36` | `extract_natural_frequency()` — Python FFT reference |
