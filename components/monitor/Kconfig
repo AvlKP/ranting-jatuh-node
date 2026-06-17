@@ -192,6 +192,14 @@ config MONITOR_FF_DUR
         Free-fall duration event. Duration = FF_DUR + 1 in ODR cycles.
         Each LSB extends duration by 1 ODR.
 
+config MONITOR_FREEFALL_DEBOUNCE_MS
+    int "Free-fall publish cooldown (ms)"
+    default 10000
+    range 0 3600000
+    help
+        Minimum interval between successive free-fall failure publishes.
+        Default 10000 means 10 seconds. Set to 0 to disable cooldown.
+
 config MONITOR_FFT_DE_MEAN_ENABLE
     bool "Enable de-meaning/zero-centering of FFT input"
     default y

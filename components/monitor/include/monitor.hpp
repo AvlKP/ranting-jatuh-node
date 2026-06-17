@@ -106,6 +106,7 @@ struct MonitorConfig {
     float spectral_jump_threshold{static_cast<float>(CONFIG_MONITOR_AE_SPECTRAL_JUMP_THRESHOLD_X10) / 10.0f}; ///< AE spectral energy-jump latch threshold.
     std::uint32_t spectral_latch_duration_ms{static_cast<std::uint32_t>(CONFIG_MONITOR_AE_SPECTRAL_LATCH_DURATION_MS)}; ///< AE spectral latch hold time [ms].
     std::uint32_t spectral_min_publish_interval_ms{static_cast<std::uint32_t>(CONFIG_MONITOR_AE_SPECTRAL_MIN_PUBLISH_INTERVAL_MS)}; ///< AE spectral repeat publish interval [ms].
+    std::uint32_t freefall_debounce_ms{static_cast<std::uint32_t>(CONFIG_MONITOR_FREEFALL_DEBOUNCE_MS)}; ///< Free-fall publish cooldown interval [ms].
 };
 
 /// @brief Disturbance state machine states.
@@ -522,6 +523,7 @@ private:
     std::uint32_t pending_ae_events_{0U};
     std::atomic<std::uint32_t> dropped_result_events_{0U};
     std::atomic<std::uint32_t> dropped_failure_events_{0U};
+    std::uint64_t last_freefall_publish_us_{0U};
 
     static constexpr std::size_t kMaxStreamSamples = 20U;
     std::array<StreamSample, kMaxStreamSamples> stream_samples_{};

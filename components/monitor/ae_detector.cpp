@@ -88,17 +88,12 @@ bool AeSpectralDetector::ComputeWindowEnergy(const std::uint16_t* samples,
     }
 
     const std::size_t window_size = config.spectral_window_size;
-    float sum = 0.0f;
-    for (std::size_t i = 0U; i < window_size; ++i) {
-        sum += static_cast<float>(samples[i]);
-    }
-    const float mean = sum / static_cast<float>(window_size);
 
     std::fill(fft_buffer, fft_buffer + (window_size * 2U), 0.0f);
     for (std::size_t i = 0U; i < window_size; ++i) {
         const float denom = static_cast<float>(window_size - 1U);
         const float window = 0.54f - (0.46f * std::cos(kTwoPi * static_cast<float>(i) / denom));
-        fft_buffer[2U * i] = (static_cast<float>(samples[i]) - mean) * window;
+        fft_buffer[2U * i] = static_cast<float>(samples[i]) * window;
         fft_buffer[(2U * i) + 1U] = 0.0f;
     }
 
@@ -153,39 +148,39 @@ AeSpectralUpdateResult AeSpectralDetector::UpdateEnergy(float energy,
     has_previous_energy_ = true;
 
     integrator_ = (config.spectral_leak_alpha * integrator_) + energy;
-    float gradient = 0.0f;
+    gradient_ring_[gradient_write_index_] = integrator_;
+
     const bool gradient_full = gradient_count_ >= config.spectral_gradient_window;
-    if (gradient_full) {
-        gradient = integrator_ - gradient_ring_[gradient_write_index_];
-    } else {
+    if (!gradient_full) {
         ++gradient_count_;
     }
-    gradient_ring_[gradient_write_index_] = integrator_;
-    gradient_write_index_ = (gradient_write_index_ + 1U) % config.spectral_gradient_window;
+
+    const std::size_t oldest_index = gradient_full ? ((gradient_write_index_ + 1U) % config.spectral_gradient_window) : 0U;
+    float gradient = integrator_ - gradient_ring_[oldest_index];
 
     if (gradient < 0.0f) {
         gradient = 0.0f;
     }
 
     sigma_ = std::max(0.1f, std::sqrt(std::max(0.0f, ewma_variance_)));
+    const float z_score = std::fabs((gradient - ewma_mean_) / sigma_);
+
+    if (z_score <= 3.0f) {
+        ewma_mean_ = (config.spectral_ewma_alpha * gradient) + ((1.0f - config.spectral_ewma_alpha) * ewma_mean_);
+        const float diff_new = gradient - ewma_mean_;
+        ewma_variance_ = (config.spectral_ewma_alpha * diff_new * diff_new) +
+            ((1.0f - config.spectral_ewma_alpha) * ewma_variance_);
+        sigma_ = std::max(0.1f, std::sqrt(std::max(0.0f, ewma_variance_)));
+    }
+
     const float threshold = ewma_mean_ + (config.spectral_danger_multiplier * sigma_);
     danger_active_ = gradient_full && (gradient > threshold);
 
-    if (gradient_full) {
-        const float z_score = std::fabs((gradient - ewma_mean_) / sigma_);
-        if (z_score <= 3.0f) {
-            const float diff = gradient - ewma_mean_;
-            ewma_mean_ += config.spectral_ewma_alpha * diff;
-            ewma_variance_ = (config.spectral_ewma_alpha * diff * diff) +
-                ((1.0f - config.spectral_ewma_alpha) * ewma_variance_);
-            sigma_ = std::max(0.1f, std::sqrt(std::max(0.0f, ewma_variance_)));
-        }
-    }
+    gradient_write_index_ = (gradient_write_index_ + 1U) % config.spectral_gradient_window;
 
-    const bool interval_due = danger_active_ &&
-        (config.spectral_min_publish_interval_ms > 0U) &&
-        ((last_publish_ms_ == 0U) ||
-         ((now_ms - last_publish_ms_) >= static_cast<std::uint64_t>(config.spectral_min_publish_interval_ms)));
+    const bool time_since_last_publish_ok = (last_publish_ms_ == 0U) ||
+        (config.spectral_min_publish_interval_ms == 0U) ||
+        ((now_ms - last_publish_ms_) >= static_cast<std::uint64_t>(config.spectral_min_publish_interval_ms));
 
     result.gradient = gradient;
     result.danger_threshold = threshold;
@@ -195,7 +190,7 @@ AeSpectralUpdateResult AeSpectralDetector::UpdateEnergy(float energy,
     result.latch_started = !was_latch_active && latch_active_;
     result.danger_active = danger_active_;
     result.danger_started = !was_danger_active && danger_active_;
-    result.should_publish = result.danger_started || (was_danger_active && interval_due);
+    result.should_publish = danger_active_ && latch_active_ && time_since_last_publish_ok;
     if (result.should_publish) {
         last_publish_ms_ = now_ms;
     }

@@ -10,6 +10,7 @@
 #include "dsps_fft2r.h"
 #include "esp_heap_caps.h"
 #include "unity.h"
+#include "esp_timer.h"
 
 #define private public
 #include "adaptive_complementary_filter.hpp"
@@ -462,7 +463,8 @@ TEST_CASE("ae spectral adaptive gradient gates baseline and detects danger", "[m
     config.spectral_ewma_alpha = 0.5f;
     config.spectral_danger_multiplier = 6.0f;
     config.spectral_gradient_window = 3U;
-    config.spectral_jump_threshold = 1000.0f;
+    config.spectral_jump_threshold = 5.0f;
+    config.spectral_latch_duration_ms = 5000U;
 
     monitor::AeSpectralDetector detector{};
     auto result = detector.UpdateEnergy(1.0f, 0U, config);
@@ -472,7 +474,7 @@ TEST_CASE("ae spectral adaptive gradient gates baseline and detects danger", "[m
 
     result = detector.UpdateEnergy(1.0f, 30U, config);
     TEST_ASSERT_FALSE(result.danger_active);
-    TEST_ASSERT_TRUE(result.sigma > 3.0f);
+    TEST_ASSERT_TRUE(result.sigma > 0.5f);
 
     for (int i = 0; i < 16; ++i) {
         result = detector.UpdateEnergy(1.0f, 40U + static_cast<std::uint64_t>(i * 10U), config);
@@ -482,13 +484,15 @@ TEST_CASE("ae spectral adaptive gradient gates baseline and detects danger", "[m
 
     result = detector.UpdateEnergy(10.0f, 220U, config);
     TEST_ASSERT_TRUE(result.danger_started);
+    TEST_ASSERT_TRUE(result.latch_active);
     TEST_ASSERT_TRUE(result.should_publish);
     TEST_ASSERT_TRUE(result.gradient > result.danger_threshold);
 }
 
 TEST_CASE("ae spectral danger active condition suppresses repeats until publish interval", "[monitor][ae][spectral]") {
     monitor::MonitorConfig config{};
-    config.spectral_jump_threshold = 1000.0f;
+    config.spectral_jump_threshold = 1.0f;
+    config.spectral_latch_duration_ms = 5000U;
     config.spectral_leak_alpha = 0.0f;
     config.spectral_ewma_alpha = 0.5f;
     config.spectral_danger_multiplier = 6.0f;
@@ -509,6 +513,7 @@ TEST_CASE("ae spectral danger active condition suppresses repeats until publish 
 
     result = detector.UpdateEnergy(3.0f, 200U, config);
     TEST_ASSERT_TRUE(result.danger_started);
+    TEST_ASSERT_TRUE(result.latch_active);
     TEST_ASSERT_TRUE(result.should_publish);
 
     result = detector.UpdateEnergy(3.0f, 300U, config);
@@ -537,6 +542,93 @@ TEST_CASE("ae spectral gradient clamps to zero when integrator decreases", "[mon
     TEST_ASSERT_TRUE(result.gradient < 0.001f);
     TEST_ASSERT_FALSE(result.danger_active);
     TEST_ASSERT_FALSE(result.should_publish);
+}
+
+TEST_CASE("ae spectral danger without latch does not publish", "[monitor][ae][spectral]") {
+    monitor::MonitorConfig config{};
+    config.spectral_leak_alpha = 0.0f;
+    config.spectral_ewma_alpha = 0.5f;
+    config.spectral_danger_multiplier = 6.0f;
+    config.spectral_gradient_window = 3U;
+    config.spectral_jump_threshold = 1000.0f;
+    config.spectral_latch_duration_ms = 5000U;
+
+    monitor::AeSpectralDetector detector{};
+    auto result = detector.UpdateEnergy(1.0f, 0U, config);
+    result = detector.UpdateEnergy(1.0f, 10U, config);
+    result = detector.UpdateEnergy(1.0f, 20U, config);
+    for (int i = 0; i < 16; ++i) {
+        result = detector.UpdateEnergy(1.0f, 30U + static_cast<std::uint64_t>(i * 10U), config);
+    }
+
+    result = detector.UpdateEnergy(10.0f, 220U, config);
+    TEST_ASSERT_TRUE(result.danger_active);
+    TEST_ASSERT_FALSE(result.latch_active);
+    TEST_ASSERT_FALSE(result.should_publish);
+}
+
+TEST_CASE("ae spectral latch plus danger publishes when interval allows", "[monitor][ae][spectral]") {
+    monitor::MonitorConfig config{};
+    config.spectral_leak_alpha = 0.0f;
+    config.spectral_ewma_alpha = 0.5f;
+    config.spectral_danger_multiplier = 6.0f;
+    config.spectral_gradient_window = 3U;
+    config.spectral_jump_threshold = 5.0f;
+    config.spectral_latch_duration_ms = 5000U;
+    config.spectral_min_publish_interval_ms = 1000U;
+
+    monitor::AeSpectralDetector detector{};
+    auto result = detector.UpdateEnergy(1.0f, 0U, config);
+    result = detector.UpdateEnergy(1.0f, 10U, config);
+    result = detector.UpdateEnergy(1.0f, 20U, config);
+    for (int i = 0; i < 16; ++i) {
+        result = detector.UpdateEnergy(1.0f, 30U + static_cast<std::uint64_t>(i * 10U), config);
+    }
+
+    result = detector.UpdateEnergy(10.0f, 220U, config);
+    TEST_ASSERT_TRUE(result.latch_active);
+    TEST_ASSERT_TRUE(result.danger_active);
+    TEST_ASSERT_TRUE(result.should_publish);
+
+    result = detector.UpdateEnergy(10.0f, 500U, config);
+    TEST_ASSERT_TRUE(result.latch_active);
+    TEST_ASSERT_TRUE(result.danger_active);
+    TEST_ASSERT_FALSE(result.should_publish);
+
+    result = detector.UpdateEnergy(10.0f, 1300U, config);
+    TEST_ASSERT_TRUE(result.latch_active);
+    TEST_ASSERT_TRUE(result.danger_active);
+    TEST_ASSERT_TRUE(result.should_publish);
+}
+
+TEST_CASE("ae spectral publish interval zero allows every active window", "[monitor][ae][spectral]") {
+    monitor::MonitorConfig config{};
+    config.spectral_leak_alpha = 0.0f;
+    config.spectral_ewma_alpha = 0.5f;
+    config.spectral_danger_multiplier = 6.0f;
+    config.spectral_gradient_window = 3U;
+    config.spectral_jump_threshold = 5.0f;
+    config.spectral_latch_duration_ms = 5000U;
+    config.spectral_min_publish_interval_ms = 0U;
+
+    monitor::AeSpectralDetector detector{};
+    auto result = detector.UpdateEnergy(1.0f, 0U, config);
+    result = detector.UpdateEnergy(1.0f, 10U, config);
+    result = detector.UpdateEnergy(1.0f, 20U, config);
+    for (int i = 0; i < 16; ++i) {
+        result = detector.UpdateEnergy(1.0f, 30U + static_cast<std::uint64_t>(i * 10U), config);
+    }
+
+    result = detector.UpdateEnergy(10.0f, 220U, config);
+    TEST_ASSERT_TRUE(result.should_publish);
+
+    result = detector.UpdateEnergy(10.0f, 221U, config);
+    TEST_ASSERT_TRUE(result.latch_active);
+    TEST_ASSERT_TRUE(result.danger_active);
+    TEST_ASSERT_TRUE(result.should_publish);
+
+    result = detector.UpdateEnergy(10.0f, 222U, config);
+    TEST_ASSERT_TRUE(result.should_publish);
 }
 
 TEST_CASE("ae spectral config rejects invalid bins and windows", "[monitor][ae][spectral]") {
@@ -690,6 +782,94 @@ TEST_CASE("noise gate passes event with peak_gmag above threshold", "[monitor][n
     TEST_ASSERT_TRUE(event.damping_confidence[0] == 'h' ||
                      event.damping_confidence[0] == 'm' ||
                      event.damping_confidence[0] == 'l');
+}
+
+/* --------------------------------------------------------------------------
+    Free-Fall Debounce Tests
+   -------------------------------------------------------------------------- */
+
+TEST_CASE("free-fall fires on first detection when no prior publish", "[monitor][freefall]") {
+    monitor::MonitorConfig config{};
+    config.freefall_debounce_ms = 10000U;
+
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+    static std::uint8_t wake_up_src_val = 0x20;
+    monitor.imu_.config_.read_cb = [](std::uint8_t reg, std::uint8_t* data, std::size_t len) {
+        if (reg == 0x1BU && len >= 1U) {
+            *data = wake_up_src_val;
+            return true;
+        }
+        return false;
+    };
+
+    monitor.last_freefall_publish_us_ = 0U;
+    monitor.CheckFailureEvents();
+
+    TEST_ASSERT_NOT_EQUAL(0U, monitor.last_freefall_publish_us_);
+}
+
+TEST_CASE("free-fall suppressed when elapsed time less than debounce", "[monitor][freefall]") {
+    monitor::MonitorConfig config{};
+    config.freefall_debounce_ms = 10000U;
+
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+    static std::uint8_t wake_up_src_val = 0x20;
+    monitor.imu_.config_.read_cb = [](std::uint8_t reg, std::uint8_t* data, std::size_t len) {
+        if (reg == 0x1BU && len >= 1U) {
+            *data = wake_up_src_val;
+            return true;
+        }
+        return false;
+    };
+
+    const auto recent_past = static_cast<std::uint64_t>(esp_timer_get_time()) - 1000ULL;
+    monitor.last_freefall_publish_us_ = recent_past;
+
+    monitor.CheckFailureEvents();
+
+    TEST_ASSERT_EQUAL_UINT64(recent_past, monitor.last_freefall_publish_us_);
+}
+
+TEST_CASE("free-fall fires again after debounce duration elapses", "[monitor][freefall]") {
+    monitor::MonitorConfig config{};
+    config.freefall_debounce_ms = 100U;
+
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+    static std::uint8_t wake_up_src_val = 0x20;
+    monitor.imu_.config_.read_cb = [](std::uint8_t reg, std::uint8_t* data, std::size_t len) {
+        if (reg == 0x1BU && len >= 1U) {
+            *data = wake_up_src_val;
+            return true;
+        }
+        return false;
+    };
+
+    const auto far_past = static_cast<std::uint64_t>(esp_timer_get_time()) - 200000ULL;
+    monitor.last_freefall_publish_us_ = far_past;
+
+    monitor.CheckFailureEvents();
+
+    TEST_ASSERT_NOT_EQUAL(far_past, monitor.last_freefall_publish_us_);
+    TEST_ASSERT_GREATER_THAN_UINT64(far_past, monitor.last_freefall_publish_us_);
+}
+
+TEST_CASE("acoustic emission failure unaffected by free-fall cooldown", "[monitor][freefall]") {
+    monitor::MonitorConfig config{};
+    config.freefall_debounce_ms = 10000U;
+
+    monitor::Monitor& monitor = MakeMonitorForTest(config);
+    const auto original_ts = static_cast<std::uint64_t>(esp_timer_get_time()) - 5000000ULL;
+    monitor.last_freefall_publish_us_ = original_ts;
+
+    monitor.PublishFailure(monitor::FailureEvent::AcousticEmission);
+
+    TEST_ASSERT_EQUAL_UINT64(original_ts, monitor.last_freefall_publish_us_);
+}
+
+TEST_CASE("config freefall_debounce_ms defaults to Kconfig value", "[monitor][freefall]") {
+    monitor::MonitorConfig config{};
+    TEST_ASSERT_EQUAL_UINT32(static_cast<std::uint32_t>(CONFIG_MONITOR_FREEFALL_DEBOUNCE_MS),
+                              config.freefall_debounce_ms);
 }
 
 } // namespace

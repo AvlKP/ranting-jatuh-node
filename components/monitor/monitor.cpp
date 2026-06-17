@@ -225,7 +225,12 @@ bool Monitor::ReadImu(sensor::lsm6ds3::Value& gyro,
 void Monitor::CheckFailureEvents() noexcept {
     const auto events = imu_.get_motion_events();
     if (events.free_fall) {
-        PublishFailure(FailureEvent::FreeFall);
+        const auto now_us = static_cast<std::uint64_t>(esp_timer_get_time());
+        const auto cooldown_us = static_cast<std::uint64_t>(config_.freefall_debounce_ms) * 1000ULL;
+        if (last_freefall_publish_us_ == 0U || (now_us - last_freefall_publish_us_) >= cooldown_us) {
+            PublishFailure(FailureEvent::FreeFall);
+            last_freefall_publish_us_ = now_us;
+        }
     }
 
     CheckAeFailureEvents();

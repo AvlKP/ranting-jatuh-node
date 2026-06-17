@@ -1,9 +1,5 @@
-# ae-spectral-detector Specification
+## MODIFIED Requirements
 
-## Purpose
-Spectral acoustic emission detector mode for tree branch failure detection via high-frequency energy analysis.
-
-## Requirements
 ### Requirement: Spectral acoustic emission detector mode
 The monitor SHALL provide a Kconfig-selectable spectral ADC acoustic emission detector mode that samples the configured AE ADC channel, computes high-frequency spectral energy, and publishes acoustic emission failures through the existing monitor failure event pipeline.
 
@@ -33,21 +29,6 @@ The monitor SHALL provide a Kconfig-selectable spectral ADC acoustic emission de
 - **AND** `MONITOR_AE_SPECTRAL_JUMP_THRESHOLD_X10` SHALL be 200
 - **AND** `MONITOR_AE_SPECTRAL_LATCH_DURATION_MS` SHALL be 2000
 - **AND** `MONITOR_AE_SPECTRAL_MIN_PUBLISH_INTERVAL_MS` SHALL be 2000
-
-### Requirement: Detector SHALL compute high-frequency energy from FFT bins
-The spectral detector SHALL transform each full sample window with a Hamming window and FFT, then compute high-frequency energy from the configured FFT bin range.
-
-#### Scenario: Default bin energy calculation
-- **WHEN** the detector has collected 256 ADC samples
-- **THEN** it SHALL apply a Hamming window to the sample window
-- **AND** it SHALL compute FFT magnitudes using ESP-IDF-compatible DSP code
-- **AND** it SHALL sum magnitude bins 64 through 127 by default
-- **AND** it SHALL divide the summed energy by 1000.0 before state detection
-
-#### Scenario: Configured bin range is bounded
-- **WHEN** configured spectral bin start or end values fall outside the valid positive-frequency FFT range
-- **THEN** initialization SHALL fail or clamp the range before sampling starts
-- **AND** the detector SHALL NOT read outside its FFT output buffer
 
 ### Requirement: Energy jump latch SHALL track state without publishing failure events
 The detector SHALL track the energy-jump latch state internally for diagnostics and as an acoustic-emission publish prerequisite, but SHALL NOT publish `FailureEvent::AcousticEmission` when the latch activates by itself.
