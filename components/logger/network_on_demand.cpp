@@ -6,6 +6,7 @@
 /// @ingroup logger
 
 #include "network_strategy.hpp"
+#include "network_wifi_reason.hpp"
 
 #include <cstdint>
 #include <cstring>
@@ -18,6 +19,7 @@
 #include "esp_eap_client.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
+#include "freertos/task.h"
 #include "sdkconfig.h"
 #include "nvs_init.hpp"
 
@@ -25,9 +27,24 @@ namespace logger::network {
 
 namespace {
 
-constexpr EventBits_t kWifiConnectedBit = BIT0;
-constexpr EventBits_t kWifiFailedBit = BIT1;
-constexpr std::uint32_t kWifiConnectTimeoutMs = 20000U;
+enum class Lifecycle : std::uint8_t {
+    kStopped,
+    kStarting,
+    kConnecting,
+    kConnected,
+    kReleasing,
+    kStopping,
+};
+
+constexpr EventBits_t kGotIpBit = BIT0;
+constexpr EventBits_t kDisconnectedBit = BIT1;
+constexpr EventBits_t kStoppedBit = BIT2;
+constexpr EventBits_t kAllWaitBits = kGotIpBit | kDisconnectedBit | kStoppedBit;
+
+constexpr std::uint32_t kConnectTimeoutMs = 45000U;
+constexpr std::uint32_t kCleanupTimeoutMs = 2000U;
+constexpr std::uint32_t kMaxConnectAttempts = 3U;
+constexpr std::uint32_t kRetryDelayMs = 1000U;
 
 static const char* kTag = "NET_ON_DEMAND";
 
@@ -37,50 +54,74 @@ EventGroupHandle_t s_wifi_event_group = nullptr;
 bool s_netif_initialized = false;
 bool s_wifi_initialized = false;
 bool s_events_registered = false;
-std::uint8_t s_last_disconnect_reason = 0U;
 
-const char* WifiReasonString(std::uint8_t reason) {
-    switch (reason) {
-        case WIFI_REASON_AUTH_FAIL:           return "auth_fail";
-        case WIFI_REASON_NO_AP_FOUND:         return "no_ap";
-        case WIFI_REASON_ASSOC_FAIL:          return "assoc_fail";
-        case WIFI_REASON_HANDSHAKE_TIMEOUT:   return "handshake_timeout";
-        case WIFI_REASON_4WAY_HANDSHAKE_TIMEOUT: return "4way_timeout";
-        case WIFI_REASON_BEACON_TIMEOUT:      return "beacon_timeout";
-        case WIFI_REASON_MIC_FAILURE:         return "mic_failure";
-        case WIFI_REASON_AUTH_EXPIRE:         return "auth_expire";
-        case WIFI_REASON_AUTH_LEAVE:          return "auth_leave";
-        case WIFI_REASON_ASSOC_EXPIRE:        return "assoc_expire";
-        case WIFI_REASON_ASSOC_LEAVE:         return "assoc_leave";
-        case WIFI_REASON_NOT_AUTHED:          return "not_authed";
-        case WIFI_REASON_NOT_ASSOCED:         return "not_assoc";
-        default:                              return "unknown";
-    }
-}
+volatile Lifecycle s_lifecycle = Lifecycle::kStopped;
+volatile std::uint8_t s_last_disconnect_reason = 0U;
+
+using logger::network::WifiReasonString;
+using logger::network::IsReleaseReason;
+using logger::network::IsTransientReason;
 
 void WifiEventHandler(void*,
                       esp_event_base_t event_base,
                       int32_t event_id,
                       void* event_data) {
-    if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_START) {
-        esp_wifi_connect();
-    } else if (event_base == WIFI_EVENT && event_id == WIFI_EVENT_STA_DISCONNECTED) {
-        if (event_data != nullptr) {
-            const auto* disconnected =
-                static_cast<wifi_event_sta_disconnected_t*>(event_data);
-            s_last_disconnect_reason = disconnected->reason;
-            ESP_LOGW(kTag,
-                     "WiFi disconnected: reason=%u (%s)",
-                     static_cast<std::uint32_t>(disconnected->reason),
-                     WifiReasonString(disconnected->reason));
-        } else {
-            s_last_disconnect_reason = 0U;
-            ESP_LOGW(kTag, "WiFi disconnected: reason=unknown");
+    if (event_base != WIFI_EVENT) {
+        return;
+    }
+
+    switch (event_id) {
+        case WIFI_EVENT_STA_START:
+            if (s_lifecycle == Lifecycle::kStarting) {
+                s_lifecycle = Lifecycle::kConnecting;
+                esp_wifi_connect();
+            }
+            break;
+
+        case WIFI_EVENT_STA_DISCONNECTED: {
+            std::uint8_t reason = 0U;
+            if (event_data != nullptr) {
+                const auto* info =
+                    static_cast<wifi_event_sta_disconnected_t*>(event_data);
+                reason = info->reason;
+            }
+            s_last_disconnect_reason = reason;
+
+            const Lifecycle phase = s_lifecycle;
+            const bool expected = (phase == Lifecycle::kReleasing ||
+                                   phase == Lifecycle::kStopping);
+
+            if (expected && IsReleaseReason(reason)) {
+                ESP_LOGI(kTag,
+                         "Expected release disconnect: reason=%u (%s)",
+                         static_cast<std::uint32_t>(reason),
+                         WifiReasonString(reason));
+            } else if (expected) {
+                ESP_LOGD(kTag,
+                         "Disconnect during cleanup: reason=%u (%s)",
+                         static_cast<std::uint32_t>(reason),
+                         WifiReasonString(reason));
+            } else {
+                ESP_LOGW(kTag,
+                         "WiFi connect failed: reason=%u (%s)",
+                         static_cast<std::uint32_t>(reason),
+                         WifiReasonString(reason));
+            }
+
+            if (s_wifi_event_group != nullptr) {
+                xEventGroupSetBits(s_wifi_event_group, kDisconnectedBit);
+            }
+            break;
         }
-        if (s_wifi_event_group != nullptr) {
-            xEventGroupSetBits(s_wifi_event_group, kWifiFailedBit);
-        }
-        // On-demand mode: no auto-reconnect
+
+        case WIFI_EVENT_STA_STOP:
+            if (s_wifi_event_group != nullptr) {
+                xEventGroupSetBits(s_wifi_event_group, kStoppedBit);
+            }
+            break;
+
+        default:
+            break;
     }
 }
 
@@ -89,18 +130,16 @@ void IpEventHandler(void*,
                     int32_t event_id,
                     void* event_data) {
     if (event_base == IP_EVENT && event_id == IP_EVENT_STA_GOT_IP) {
-        if (s_wifi_event_group != nullptr) {
-            xEventGroupSetBits(s_wifi_event_group, kWifiConnectedBit);
+        if (s_lifecycle == Lifecycle::kConnecting) {
+            if (s_wifi_event_group != nullptr) {
+                xEventGroupSetBits(s_wifi_event_group, kGotIpBit);
+            }
         }
     }
 }
 
 bool InitNvs() {
-    const esp_err_t err = runtime::EnsureNvsInitialized();
-    if (err != ESP_OK) {
-        return false;
-    }
-    return true;
+    return runtime::EnsureNvsInitialized() == ESP_OK;
 }
 
 bool InitWifiCore() {
@@ -133,11 +172,13 @@ bool InitWifiCore() {
     }
 
     if (!s_events_registered) {
-        if (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &WifiEventHandler, nullptr) != ESP_OK) {
+        if (esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
+                                       &WifiEventHandler, nullptr) != ESP_OK) {
             ESP_LOGE(kTag, "WiFi event handler register failed");
             return false;
         }
-        if (esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &IpEventHandler, nullptr) != ESP_OK) {
+        if (esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP,
+                                       &IpEventHandler, nullptr) != ESP_OK) {
             ESP_LOGE(kTag, "IP event handler register failed");
             return false;
         }
@@ -151,6 +192,28 @@ bool InitWifiCore() {
     return s_wifi_event_group != nullptr;
 }
 
+void CleanupWifi() {
+    const Lifecycle prev = s_lifecycle;
+    s_lifecycle = Lifecycle::kStopping;
+
+    if (prev == Lifecycle::kConnecting || prev == Lifecycle::kConnected) {
+        esp_wifi_disconnect();
+    }
+    esp_wifi_stop();
+
+    if (s_wifi_event_group != nullptr) {
+        const EventBits_t bits = xEventGroupWaitBits(
+            s_wifi_event_group, kStoppedBit,
+            pdTRUE, pdFALSE,
+            pdMS_TO_TICKS(kCleanupTimeoutMs));
+        if ((bits & kStoppedBit) == 0U) {
+            ESP_LOGW(kTag, "Cleanup: stop event not received within timeout");
+        }
+    }
+
+    s_lifecycle = Lifecycle::kStopped;
+}
+
 } // namespace
 
 bool Init() noexcept {
@@ -158,7 +221,7 @@ bool Init() noexcept {
 }
 
 bool EnsureConnected() noexcept {
-    if (IsConnected()) {
+    if (s_lifecycle == Lifecycle::kConnected) {
         return true;
     }
 
@@ -221,45 +284,115 @@ bool EnsureConnected() noexcept {
     }
 #endif
 
-    xEventGroupClearBits(s_wifi_event_group, kWifiConnectedBit | kWifiFailedBit);
-    s_last_disconnect_reason = 0U;
+    for (std::uint32_t attempt = 0U; attempt < kMaxConnectAttempts; ++attempt) {
+        xEventGroupClearBits(s_wifi_event_group, kAllWaitBits);
+        s_last_disconnect_reason = 0U;
+        s_lifecycle = Lifecycle::kStarting;
 
-    if (esp_wifi_start() != ESP_OK) {
-        ESP_LOGE(kTag, "WiFi start failed");
+        ESP_LOGI(kTag, "Start wifi connect (attempt %lu/%lu)",
+                 static_cast<unsigned long>(attempt + 1U),
+                 static_cast<unsigned long>(kMaxConnectAttempts));
+
+        if (esp_wifi_start() != ESP_OK) {
+            ESP_LOGE(kTag, "WiFi start failed");
+            CleanupWifi();
+            return false;
+        }
+
+        const EventBits_t bits = xEventGroupWaitBits(
+            s_wifi_event_group,
+            kGotIpBit | kDisconnectedBit,
+            pdTRUE,
+            pdFALSE,
+            pdMS_TO_TICKS(kConnectTimeoutMs));
+
+        if ((bits & kGotIpBit) != 0U) {
+            s_lifecycle = Lifecycle::kConnected;
+            ESP_LOGI(kTag, "WiFi connected");
+            return true;
+        }
+
+        const std::uint8_t reason = s_last_disconnect_reason;
+
+        if ((bits & kDisconnectedBit) != 0U) {
+            const bool retryable = IsTransientReason(reason) &&
+                                   (attempt + 1U) < kMaxConnectAttempts;
+            if (retryable) {
+                ESP_LOGW(kTag,
+                         "Transient failure reason=%u (%s), retry %lu/%lu",
+                         static_cast<std::uint32_t>(reason),
+                         WifiReasonString(reason),
+                         static_cast<unsigned long>(attempt + 2U),
+                         static_cast<unsigned long>(kMaxConnectAttempts));
+                CleanupWifi();
+                vTaskDelay(pdMS_TO_TICKS(kRetryDelayMs));
+                continue;
+            }
+
+            ESP_LOGE(kTag,
+                     "Connect failed: reason=%u (%s) after %lu attempt(s)",
+                     static_cast<std::uint32_t>(reason),
+                     WifiReasonString(reason),
+                     static_cast<unsigned long>(attempt + 1U));
+            CleanupWifi();
+            return false;
+        }
+
+        if (reason != 0U) {
+            ESP_LOGE(kTag,
+                     "Connect timeout with late reason=%u (%s)",
+                     static_cast<std::uint32_t>(reason),
+                     WifiReasonString(reason));
+        } else {
+            ESP_LOGE(kTag, "Connect timeout: no disconnect reason observed");
+        }
+        CleanupWifi();
         return false;
     }
 
-    const EventBits_t bits = xEventGroupWaitBits(s_wifi_event_group,
-                                                 kWifiConnectedBit | kWifiFailedBit,
-                                                 pdTRUE,
-                                                 pdFALSE,
-                                                 pdMS_TO_TICKS(kWifiConnectTimeoutMs));
-    if ((bits & kWifiFailedBit) != 0U) {
-        ESP_LOGE(kTag,
-                 "WiFi connect failed: reason=%u (%s)",
-                 static_cast<std::uint32_t>(s_last_disconnect_reason),
-                 WifiReasonString(s_last_disconnect_reason));
-        return false;
-    }
-    if ((bits & kWifiConnectedBit) == 0U) {
-        ESP_LOGE(kTag, "WiFi connect timeout");
-        return false;
-    }
-
-    return true;
+    CleanupWifi();
+    return false;
 }
 
 void ReleaseConnection() noexcept {
+    if (s_lifecycle == Lifecycle::kStopped) {
+        return;
+    }
+
+    if (s_lifecycle != Lifecycle::kConnected &&
+        s_lifecycle != Lifecycle::kConnecting) {
+        CleanupWifi();
+        return;
+    }
+
+    s_lifecycle = Lifecycle::kReleasing;
+
+    if (s_wifi_event_group != nullptr) {
+        xEventGroupClearBits(s_wifi_event_group, kDisconnectedBit | kStoppedBit);
+    }
+
     esp_wifi_disconnect();
+
+    if (s_wifi_event_group != nullptr) {
+        xEventGroupWaitBits(s_wifi_event_group, kDisconnectedBit,
+                            pdTRUE, pdFALSE,
+                            pdMS_TO_TICKS(kCleanupTimeoutMs));
+    }
+
     esp_wifi_stop();
+
+    if (s_wifi_event_group != nullptr) {
+        xEventGroupWaitBits(s_wifi_event_group, kStoppedBit,
+                            pdTRUE, pdFALSE,
+                            pdMS_TO_TICKS(kCleanupTimeoutMs));
+    }
+
+    s_lifecycle = Lifecycle::kStopped;
+    ESP_LOGI(kTag, "Connection released");
 }
 
 bool IsConnected() noexcept {
-    if (s_wifi_event_group == nullptr) {
-        return false;
-    }
-    const EventBits_t bits = xEventGroupGetBits(s_wifi_event_group);
-    return (bits & kWifiConnectedBit) != 0U;
+    return s_lifecycle == Lifecycle::kConnected;
 }
 
 } // namespace logger::network
