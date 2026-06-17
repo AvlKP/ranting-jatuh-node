@@ -228,6 +228,16 @@ config MONITOR_IMU_CALIBRATION
         from raw IMU values before filter processing. Biases default to zero if
         NVS key missing.
 
+config MONITOR_IMU_MOUNT_LID
+    bool "IMU lid-mount orientation (180 deg Y-flip)"
+    default n
+    help
+        Enable when the PCB is mounted on the enclosure lid instead of the body.
+        Applies a 180-degree rotation around the LSM6DS3 Y-axis by negating the
+        X and Z components of accelerometer and gyroscope data after bias
+        subtraction. This restores the branch frame convention (Z-up, X-down,
+        Y-toward-joint) for the flipped mounting.
+
 config MONITOR_DISTURBED_EXIT_DEBOUNCE
     int "DISTURBED to IDLE exit debounce count (samples)"
     default 64

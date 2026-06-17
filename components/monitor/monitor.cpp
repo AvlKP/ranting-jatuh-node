@@ -131,12 +131,21 @@ bool Monitor::Update(float dt_s) noexcept {
         return false;
     }
 
+#if CONFIG_MONITOR_IMU_MOUNT_LID
+    const float calib_ax = -(accel.x - calib_bias_.ax);
+    const float calib_ay = accel.y - calib_bias_.ay;
+    const float calib_az = -(accel.z - calib_bias_.az);
+    const float calib_gx = -(gyro.x - calib_bias_.gx);
+    const float calib_gy = gyro.y - calib_bias_.gy;
+    const float calib_gz = -(gyro.z - calib_bias_.gz);
+#else
     const float calib_ax = accel.x - calib_bias_.ax;
     const float calib_ay = accel.y - calib_bias_.ay;
     const float calib_az = accel.z - calib_bias_.az;
     const float calib_gx = gyro.x - calib_bias_.gx;
     const float calib_gy = gyro.y - calib_bias_.gy;
     const float calib_gz = gyro.z - calib_bias_.gz;
+#endif
 
     const std::array<float, 3> accel_vec{calib_ax, calib_ay, calib_az};
     const std::array<float, 3> gyro_vec{calib_gx, calib_gy, calib_gz};

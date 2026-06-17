@@ -162,6 +162,58 @@ TEST_CASE("branch hanging vertically gives near-zero pitch and roll", "[monitor]
 }
 
 /* --------------------------------------------------------------------------
+   6.3 Lid-Mount Axis Transform Tests (180 deg Y-axis rotation)
+   -------------------------------------------------------------------------- */
+
+TEST_CASE("lid-mount transform negates accel X and Z, preserves Y", "[monitor][axis][lid-mount]") {
+    const float sensor_ax = 0.15f;
+    const float sensor_ay = -0.30f;
+    const float sensor_az = 0.95f;
+
+    const float branch_ax = -sensor_ax;
+    const float branch_ay =  sensor_ay;
+    const float branch_az = -sensor_az;
+
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, -0.15f, branch_ax);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, -0.30f, branch_ay);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, -0.95f, branch_az);
+}
+
+TEST_CASE("lid-mount transform negates gyro X and Z, preserves Y", "[monitor][axis][lid-mount]") {
+    const float sensor_gx = 1.5f;
+    const float sensor_gy = -2.0f;
+    const float sensor_gz = 0.8f;
+
+    const float branch_gx = -sensor_gx;
+    const float branch_gy =  sensor_gy;
+    const float branch_gz = -sensor_gz;
+
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, -1.5f, branch_gx);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, -2.0f, branch_gy);
+    TEST_ASSERT_FLOAT_WITHIN(0.0001f, -0.8f, branch_gz);
+}
+
+TEST_CASE("lid-mount vertical branch gives near-zero pitch and roll after transform", "[monitor][axis][lid-mount]") {
+    filter::Complementary f{0.98f};
+
+    const float sensor_ax = 0.0f;
+    const float sensor_ay = 0.0f;
+    const float sensor_az = -1.0f;
+
+    float accel[3] = {-sensor_ax, sensor_ay, -sensor_az};
+    float gyro[3] = {0.0f, 0.0f, 0.0f};
+    std::span<const float, 3> a{accel};
+    std::span<const float, 3> g{gyro};
+
+    for (int i = 0; i < 5; ++i) {
+        f.update(a, g, 0.01f);
+    }
+
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 0.0f, f.pitch());
+    TEST_ASSERT_FLOAT_WITHIN(1.0f, 0.0f, f.roll());
+}
+
+/* --------------------------------------------------------------------------
    6.4 Calibration Bias Subtraction Tests
    -------------------------------------------------------------------------- */
 
