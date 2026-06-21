@@ -63,6 +63,7 @@ Ranting Jatuh Node: ESP32-S3 firmware for tree-branch structural health monitori
 | `imu_algorithms/_ringbuffer.py` | — | Python reference: ring buffer for streaming path |
 | `imu_algorithms/_io.py` | — | Python reference: CSV loading utilities |
 | `docs/natural-frequency-pipeline.md` | — | Deep-dive on FFT + damping algorithm |
+| `docs/techniques-and-methodologies.md` | — | Technique selection rationale (what/why/alternatives), implementation-agnostic |
 | `openspec/specs/` | — | 24 capability specs |
 | `openspec/changes/` | — | No active changes; 5 archived in archive/ |
 | `README.md` | — | Project overview |
@@ -463,3 +464,4 @@ Active specs live in `openspec/specs/`. 24 capability specs cover every subsyste
 | Identity | `node-id-topic-prefix`, `startup-time-sync` |
 | Filter | `adaptive-complementary-filter` |
 | Documentation | `readme-documentation`, `notebook-centerline-modal-analysis` |
+| Methodology rationale | `docs/techniques-and-methodologies.md` (technique selection, implementation-agnostic) |

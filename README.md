@@ -116,3 +116,13 @@ Key Kconfig options (run `idf.py menuconfig`):
 **Server Subscription**: Use MQTT wildcard patterns — `ranting/+/parameters`, `ranting/+/failures`, `ranting/+/verify` — to receive data from all nodes. Extract `{node_id}` from the topic to identify the source.
 
 See `mqtt_interface.md` for full payload schema.
+
+## Documentation
+
+| Document | Content |
+|----------|---------|
+| `ARCHITECTURE.md` | File map, component graph, runtime layout, invariants |
+| `docs/techniques-and-methodologies.md` | Technique selection rationale (what/why/alternatives) for every methodology, implementation-agnostic |
+| `docs/natural-frequency-pipeline.md` | Full FFT + damping algorithmic trace |
+| `mqtt_interface.md` | MQTT topic schema and payload formats |
+| `openspec/specs/` | Normative capability specifications |
